@@ -13,24 +13,106 @@ jobs:
 
       - name: Convert PNG assets to C bitmaps
         run: |
-          python3 -c "import PIL" 2>/dev/null || pip install --break-system-packages pillow
           python3 - <<'EOF'
           import glob
           import os
-          from PIL import Image
+          import struct
+          import zlib
+
+          def paeth(a, b, c):
+              p = a + b - c
+              pa = abs(p - a)
+              pb = abs(p - b)
+              pc = abs(p - c)
+              if pa <= pb and pa <= pc:
+                  return a
+              if pb <= pc:
+                  return b
+              return c
+
+          def load_png_rgba(path):
+              with open(path, "rb") as f:
+                  data = f.read()
+              if data[:8] != b"\x89PNG\r\n\x1a\n":
+                  raise ValueError(f"{path} is not a valid PNG")
+
+              pos = 8
+              w = h = bit_depth = color_type = None
+              idat = bytearray()
+
+              while pos < len(data):
+                  length, chunk_type = struct.unpack(">I4s", data[pos:pos+8])
+                  chunk_data = data[pos+8:pos+8+length]
+                  pos += 12 + length
+
+                  if chunk_type == b"IHDR":
+                      w, h, bit_depth, color_type, _, _, _ = struct.unpack(">IIBBBBB", chunk_data)
+                      if bit_depth != 8 or color_type not in (2, 6):
+                          raise ValueError(f"{path}: unsupported bit_depth={bit_depth}, color_type={color_type}")
+                  elif chunk_type == b"IDAT":
+                      idat.extend(chunk_data)
+                  elif chunk_type == b"IEND":
+                      break
+
+              raw = zlib.decompress(bytes(idat))
+              bpp = 4 if color_type == 6 else 3
+              stride = w * bpp
+              recon = bytearray(h * stride)
+
+              idx = 0
+              for y in range(h):
+                  ftype = raw[idx]
+                  idx += 1
+                  row_start = y * stride
+                  prev_start = (y - 1) * stride
+
+                  for x in range(stride):
+                      val = raw[idx]
+                      idx += 1
+                      a = recon[row_start + x - bpp] if x >= bpp else 0
+                      b = recon[prev_start + x] if y > 0 else 0
+                      c = recon[prev_start + x - bpp] if (y > 0 and x >= bpp) else 0
+
+                      if ftype == 0:
+                          out = val
+                      elif ftype == 1:
+                          out = (val + a) & 0xFF
+                      elif ftype == 2:
+                          out = (val + b) & 0xFF
+                      elif ftype == 3:
+                          out = (val + ((a + b) >> 1)) & 0xFF
+                      elif ftype == 4:
+                          out = (val + paeth(a, b, c)) & 0xFF
+                      else:
+                          raise ValueError(f"{path}: unsupported PNG filter type {ftype}")
+
+                      recon[row_start + x] = out
+
+              out_pixels = []
+              for y in range(h):
+                  row = []
+                  row_start = y * stride
+                  for x in range(w):
+                      p = row_start + x * bpp
+                      r = recon[p]
+                      g = recon[p + 1]
+                      b = recon[p + 2]
+                      a = recon[p + 3] if bpp == 4 else 255
+                      row.append((r, g, b, a))
+                  out_pixels.append(row)
+
+              return w, h, out_pixels
 
           os.makedirs("source/gfx", exist_ok=True)
 
           for path in sorted(glob.glob("graphics/*.png")):
               name = os.path.splitext(os.path.basename(path))[0]
-              img = Image.open(path).convert("RGBA")
-              w, h = img.size
-              pixels = img.load()
+              w, h, pixels = load_png_rgba(path)
 
               vals = []
               for y in range(h):
                   for x in range(w):
-                      r, g, b, a = pixels[x, y]
+                      r, g, b, a = pixels[y][x]
                       if a < 128:
                           vals.append("0x0000")
                       else:
