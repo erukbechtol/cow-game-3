@@ -6,18 +6,7 @@ jobs:
     container: skylyrac/blocksds:slim-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Find BlocksDS and build
-        run: |
-          echo "BLOCKSDS env = $BLOCKSDS"
-          echo "--- default_makefiles folders ---"
-          find / -type d -name default_makefiles 2>/dev/null
-          echo "--- rom_* template folders ---"
-          find / -type d -path '*default_makefiles/rom_*' 2>/dev/null
-          D=$(find / -type d -path '*default_makefiles/rom_arm9only' 2>/dev/null | head -n1)
-          echo "using: $D"
-          B=$(dirname "$(dirname "$(dirname "$D")")")
-          echo "core dir: $B"
-          make BLOCKSDS="$B" BLOCKSDSEXT="$(dirname "$B")/external"
+      - run: make
       - uses: actions/upload-artifact@v4
         with:
           name: cowgame3-ds
