@@ -1,26 +1,36 @@
 name: Build Cow Game 3 (DS/DSi)
-on: [push, workflow_dispatch]
+
+on:
+  push:
+  workflow_dispatch:
+
 jobs:
   build:
     runs-on: ubuntu-latest
     container: skylyrac/blocksds:slim-latest
     steps:
       - uses: actions/checkout@v4
-            - name: Convert PNG assets with grit
-          run: |
+
+      - name: Convert PNG assets with grit
+        run: |
           export PATH="/opt/wonderful/bin:$PATH"
           if [ -f /opt/wonderful/env.sh ]; then
             . /opt/wonderful/env.sh
           fi
-          which grit
           mkdir -p source/gfx
           for f in graphics/*.png; do
             grit "$f" -gb -gB16 -gT! -ftc -o "source/gfx/$(basename "${f%.png}")"
           done
-          
-      - run: make
+
+      - name: Build NDS ROM
+        run: |
+          export PATH="/opt/wonderful/bin:$PATH"
+          if [ -f /opt/wonderful/env.sh ]; then
+            . /opt/wonderful/env.sh
+          fi
+          make
+
       - uses: actions/upload-artifact@v4
         with:
           name: cowgame3-ds
           path: cowgame3.nds
-          
