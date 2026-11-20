@@ -1,6 +1,6 @@
 // COW GAME 3 - Nintendo DS/DSi homebrew platformer (BlocksDS / libnds)
 // D-Pad: move | A: jump | B / Y / touch LICK: lick | L / R / touch SPIT: spit (recharging)
-// SELECT / touch RADIO: toggle radio | START / touch PAUSE: pause
+// X / touch HARD: toggle Hard Mode | SELECT / touch RADIO: toggle radio | START / touch PAUSE: pause
 #include <nds.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -29,12 +29,19 @@
 #define PH 28
 #define NE 8
 #define MAX_SPITS 4
+#define MAX_ENEMY_SPITS 6
 
 #define BOOT_FRAMES 120          // ~2 seconds at 60 FPS
 #define COYOTE_FRAMES 6
 #define JUMP_BUFFER_FRAMES 6
 #define SPIT_MAX_CHARGE 84       // ~1.4 seconds full recharge at 60 FPS
 #define SPIT_COOLDOWN_FRAMES 10
+
+// Hard mode enemy timers (at 60 FPS)
+#define ENEMY_GRACE_FRAMES 120   // 2.0s grace period so enemies cannot spawn-camp
+#define ENEMY_LICK_REGEN 150     // 2.5s lick recharge
+#define ENEMY_LICK_ACTIVE 14
+#define ENEMY_SPIT_REGEN 180     // 3.0s spit recharge
 
 // Audio synthesis settings (8-bit signed PCM loop, ~11025 Hz, 4.0s loop)
 #define AUDIO_RATE 11025
@@ -63,6 +70,7 @@
 #define SUBBG     C(4, 8, 18)
 #define LICKC     C(30, 12, 13)
 #define TONGUE    C(31, 10, 12)
+#define HARD_RED  C(31, 7, 7)
 
 static u16 *buf  = NULL;
 static u16 *sbuf = NULL;
@@ -87,6 +95,12 @@ static const Glyph font[] = {
     {':',G(0,2,0,2,0)},{'-',G(0,0,7,0,0)},{'/',G(1,1,2,4,4)},{'!',G(2,2,2,0,2)},
     {'.',G(0,0,0,0,2)},{' ',G(0,0,0,0,0)}
 };
+
+static inline u32 hash2d(int x, int y) {
+    u32 h = (u32)(x * 374761393u + y * 668265263u);
+    h = (h ^ (h >> 13)) * 1274126177u;
+    return h ^ (h >> 16);
+}
 
 static inline void px_set(u16 *b, int x, int y, u16 c) {
     if ((unsigned)x < SW && (unsigned)y < SH) {
@@ -137,6 +151,44 @@ static void text(u16 *b, const char *s, int x, int y, int sc, u16 col) {
         }
         x += 4 * sc;
     }
+}
+
+// ---- 1D Perlin-style gradient noise for seeded individual levels ----
+static float smoothstep_f(float t) {
+    return t * t * (3.0f - 2.0f * t);
+}
+
+static float grad1d(int ix, u32 seed) {
+    u32 h = (u32)ix * 374761393u ^ (seed * 668265263u + 0x9E3779B9u);
+    h = (h ^ (h >> 13)) * 1274126177u;
+    h ^= (h >> 16);
+    // Map to [-1.0, 1.0]
+    return ((float)(h & 0xFFFFu) / 32767.5f) - 1.0f;
+}
+
+static float perlin1d(float x, u32 seed) {
+    int x0 = (int)floorf(x);
+    int x1 = x0 + 1;
+    float frac = x - (float)x0;
+    float u = smoothstep_f(frac);
+
+    float n0 = grad1d(x0, seed) * frac;
+    float n1 = grad1d(x1, seed) * (frac - 1.0f);
+    return n0 + u * (n1 - n0);
+}
+
+static float fbm1d(float x, u32 seed) {
+    float sum = 0.0f;
+    float amp = 0.65f;
+    float freq = 1.0f;
+    float norm = 0.0f;
+    for (int o = 0; o < 2; o++) {
+        sum += perlin1d(x * freq, seed + (u32)(o * 7919)) * amp;
+        norm += amp;
+        amp *= 0.45f;
+        freq *= 2.05f;
+    }
+    return sum / norm; // Roughly [-1.0, 1.0]
 }
 
 // ---- Bit-crushed Portal-radio chiptune generator ----
@@ -234,58 +286,134 @@ static void toggleRadio(void) {
 }
 
 // ---- Game state ----
-typedef struct { int x, y, dir, alive, anim; } Enemy;
+typedef struct {
+    int x, y, dir, alive, anim;
+    int graceTimer;
+    int lickCooldown;
+    int lickTimer;
+    int spitCooldown;
+} Enemy;
+
 typedef struct { int x, y, vx, active; } SpitProj;
 
 static u8 map[MH][MW];
 static Enemy en[NE];
 static SpitProj spits[MAX_SPITS];
+static SpitProj enemySpits[MAX_ENEMY_SPITS];
 static int ne;
 static int x16, y16, vx16, vy16, face, ground, inv, lick;
 static int spitCharge, spitCooldown;
 static int coyoteTimer, jumpBufferTimer;
 static int score, health, state, paused, frame, bootTimer;
-// state: -1 boot splash (2s), 0 title, 1 playing, 3 win, 4 game over
+static int levelNum;
+static u32 baseSeed, levelSeed;
+static int hardMode = 0;
+// state: -1 boot splash (2s), 0 title, 1 playing, 3 level clear, 4 game over
 
 static void clearSpits(void) {
     for (int i = 0; i < MAX_SPITS; i++) {
         spits[i].active = 0;
     }
+    for (int i = 0; i < MAX_ENEMY_SPITS; i++) {
+        enemySpits[i].active = 0;
+    }
 }
 
-static void buildLevel(void) {
+static u32 rollNewBaseSeed(void) {
+    u32 s = (u32)(frame * 2654435761u) ^ (u32)(score * 2246822519u) ^ 0x5EED1234u;
+    if (s == 0) s = 0xC0FFEE42u;
+    return s;
+}
+
+static void buildLevel(int targetLevel, u32 seed) {
     memset(map, 0, sizeof map);
+    clearSpits();
+
+    int groundRow[MW];
+    int gapRun = 0;
+
     for (int c = 0; c < MW; c++) {
-        if ((c >= 20 && c <= 22) || (c >= 38 && c <= 40)) continue;
-        map[10][c] = '#';
-        map[11][c] = '#';
-    }
-    static const int plats[][3] = {
-        {8,7,4},{14,5,3},{24,7,4},{29,5,4},{34,7,3},{44,7,3},{48,5,4},{53,7,3}
-    };
-    for (unsigned i = 0; i < sizeof(plats) / sizeof(plats[0]); i++) {
-        for (int l = 0; l < plats[i][2]; l++) {
-            map[plats[i][1]][plats[i][0] + l] = '=';
+        float n = fbm1d((float)c * 0.11f, seed);
+        int isGap = 0;
+
+        // Safe start zone (cols 0..5) and goal platform zone (cols 58..63)
+        if (c >= 6 && c <= 57) {
+            // Carve occasional jumpable pits without making 2+ consecutive gap columns too wide
+            if (n < -0.34f && gapRun < 2) {
+                isGap = 1;
+                gapRun++;
+            } else {
+                gapRun = 0;
+            }
+        } else {
+            gapRun = 0;
+        }
+
+        if (isGap) {
+            groundRow[c] = MH;
+        } else {
+            // Map Perlin height to rows 8..10
+            int h = 9 + (int)roundf(-n * 1.6f);
+            if (h < 8) h = 8;
+            if (h > 10) h = 10;
+            if (c <= 4 || c >= 59) h = 10;
+            groundRow[c] = h;
+
+            for (int r = h; r < MH; r++) {
+                map[r][c] = '#';
+            }
         }
     }
-    static const int coins[][2] = {
-        {9,6},{10,6},{15,4},{16,4},{25,6},{26,6},{30,4},{31,4},
-        {21,8},{39,8},{45,6},{49,4},{50,4},{54,6},{12,9},{36,9}
-    };
-    for (unsigned i = 0; i < sizeof(coins) / sizeof(coins[0]); i++) {
-        map[coins[i][1]][coins[i][0]] = 'o';
-    }
-    static const int ecols[] = {12, 18, 27, 32, 45, 50, 56};
+
+    // Generate platforms, coins, and enemies using seeded Perlin noise
     ne = 0;
-    for (unsigned i = 0; i < sizeof(ecols) / sizeof(ecols[0]); i++) {
-        en[ne].x = ecols[i] * TS;
-        en[ne].y = 10 * TS - 20;
-        en[ne].dir = -1;
-        en[ne].alive = 1;
-        en[ne].anim = i * 7;
-        ne++;
+    int lastEnemyCol = 4;
+
+    for (int c = 7; c <= 55; c++) {
+        float pNoise = perlin1d((float)c * 0.19f + 13.7f, seed ^ 0xA5A5A5A5u);
+        float cNoise = perlin1d((float)c * 0.27f + 5.1f, seed ^ 0x3C3C3C3Cu);
+
+        // Floating platform span
+        if (pNoise > 0.26f && c + 3 <= 56) {
+            int platRow = 5 + (c % 3); // rows 5..7
+            int platLen = 3 + ((c + targetLevel) & 1);
+            int canPlace = 1;
+            for (int l = 0; l < platLen; l++) {
+                if (map[platRow][c + l] != 0) canPlace = 0;
+            }
+            if (canPlace) {
+                for (int l = 0; l < platLen; l++) {
+                    map[platRow][c + l] = '=';
+                    if (cNoise > 0.05f && l < platLen) {
+                        map[platRow - 1][c + l] = 'o';
+                    }
+                }
+                c += platLen;
+                continue;
+            }
+        }
+
+        // Ground coin
+        if (groundRow[c] < MH && cNoise > 0.18f && map[groundRow[c] - 1][c] == 0) {
+            map[groundRow[c] - 1][c] = 'o';
+        }
+
+        // Lemon enemy on solid ground with spacing and 2s spawn grace period
+        if (ne < NE && c >= lastEnemyCol + 6 && c <= 54 && groundRow[c] < MH &&
+            groundRow[c + 1] < MH && map[groundRow[c] - 1][c] == 0) {
+            en[ne].x = c * TS;
+            en[ne].y = groundRow[c] * TS - 20;
+            en[ne].dir = ((c + targetLevel) & 1) ? 1 : -1;
+            en[ne].alive = 1;
+            en[ne].anim = ne * 7;
+            en[ne].graceTimer = ENEMY_GRACE_FRAMES;
+            en[ne].lickCooldown = 30 + (ne * 18);
+            en[ne].lickTimer = 0;
+            en[ne].spitCooldown = 45 + (ne * 24);
+            ne++;
+            lastEnemyCol = c;
+        }
     }
-    clearSpits();
 }
 
 static void resetPlayer(void) {
@@ -302,15 +430,29 @@ static void resetPlayer(void) {
     spitCharge = SPIT_MAX_CHARGE;
     spitCooldown = 0;
     clearSpits();
+    for (int i = 0; i < ne; i++) {
+        if (en[i].alive && en[i].graceTimer < ENEMY_GRACE_FRAMES) {
+            en[i].graceTimer = ENEMY_GRACE_FRAMES;
+        }
+    }
+}
+
+static void startLevel(int num, u32 seed, int resetScore) {
+    levelNum = num;
+    levelSeed = seed;
+    if (resetScore) {
+        score = 0;
+        health = 8;
+    }
+    paused = 0;
+    buildLevel(levelNum, levelSeed);
+    resetPlayer();
+    state = 1;
 }
 
 static void newGame(void) {
-    buildLevel();
-    score = 0;
-    health = 8;
-    paused = 0;
-    resetPlayer();
-    state = 1;
+    baseSeed = rollNewBaseSeed();
+    startLevel(1, baseSeed + 1u, 1);
 }
 
 static int solid(int tx, int ty) {
@@ -342,7 +484,7 @@ static void hurt(void) {
     if (inv > 0) return;
     health--;
     inv = 90;
-    vy16 = -64;
+    vy16 = -68;
     ground = 0;
     coyoteTimer = 0;
     if (health <= 0) state = 4;
@@ -355,7 +497,7 @@ static void tryFireSpit(int px, int py) {
             spits[i].active = 1;
             spits[i].x = (face > 0) ? (px + PW + 2) : (px - 10);
             spits[i].y = py + 11;
-            spits[i].vx = (face > 0) ? 5 : -5;
+            spits[i].vx = (face > 0) ? 6 : -6;
             spitCharge = 0;
             spitCooldown = SPIT_COOLDOWN_FRAMES;
             break;
@@ -363,9 +505,35 @@ static void tryFireSpit(int px, int py) {
     }
 }
 
+static void tryEnemyFireSpit(const Enemy *e) {
+    for (int i = 0; i < MAX_ENEMY_SPITS; i++) {
+        if (!enemySpits[i].active) {
+            enemySpits[i].active = 1;
+            enemySpits[i].x = (e->dir > 0) ? (e->x + 26) : (e->x - 8);
+            enemySpits[i].y = e->y + 8;
+            enemySpits[i].vx = (e->dir > 0) ? 4 : -4;
+            break;
+        }
+    }
+}
+
+static void toggleHardMode(void) {
+    hardMode = !hardMode;
+    if (hardMode) {
+        for (int i = 0; i < ne; i++) {
+            if (en[i].alive && en[i].graceTimer < ENEMY_GRACE_FRAMES) {
+                en[i].graceTimer = ENEMY_GRACE_FRAMES;
+            }
+        }
+    }
+}
+
 static void updatePlay(int held, int down, int touched, int tx, int ty) {
     if (down & KEY_SELECT) {
         toggleRadio();
+    }
+    if (down & KEY_X) {
+        toggleHardMode();
     }
     if (touched && tx >= 178 && tx < 242 && ty >= 150 && ty < 182) {
         toggleRadio();
@@ -382,9 +550,10 @@ static void updatePlay(int held, int down, int touched, int tx, int ty) {
         spitCooldown--;
     }
 
+    // Sped-up walking & jumping
     int want = 0;
-    if (held & KEY_LEFT)  { want = -28; face = -1; }
-    if (held & KEY_RIGHT) { want = 28;  face = 1; }
+    if (held & KEY_LEFT)  { want = -38; face = -1; }
+    if (held & KEY_RIGHT) { want = 38;  face = 1; }
     vx16 = want;
 
     int nx = x16 + vx16;
@@ -414,18 +583,18 @@ static void updatePlay(int held, int down, int touched, int tx, int ty) {
     }
 
     if (jumpBufferTimer > 0 && coyoteTimer > 0) {
-        vy16 = -114;
+        vy16 = -130;
         ground = 0;
         coyoteTimer = 0;
         jumpBufferTimer = 0;
     }
 
-    if (!(held & KEY_A) && vy16 < -42) {
-        vy16 = -42;
+    if (!(held & KEY_A) && vy16 < -52) {
+        vy16 = -52;
     }
 
     vy16 += 5;
-    if (vy16 > 140) vy16 = 140;
+    if (vy16 > 144) vy16 = 144;
 
     int px = x16 >> 4, py = y16 >> 4;
 
@@ -469,6 +638,7 @@ static void updatePlay(int held, int down, int touched, int tx, int ty) {
         }
     }
 
+    // Player spit projectiles
     for (int s = 0; s < MAX_SPITS; s++) {
         if (!spits[s].active) continue;
         spits[s].x += spits[s].vx;
@@ -480,39 +650,106 @@ static void updatePlay(int held, int down, int touched, int tx, int ty) {
             if (en[i].alive && overlap(spits[s].x, spits[s].y, 8, 6, en[i].x, en[i].y, 24, 20)) {
                 en[i].alive = 0;
                 spits[s].active = 0;
-                score += 100;
+                score += hardMode ? 150 : 100;
                 break;
             }
         }
     }
 
+    // Enemy projectiles (Hard Mode)
+    for (int s = 0; s < MAX_ENEMY_SPITS; s++) {
+        if (!enemySpits[s].active) continue;
+        if (!hardMode) {
+            enemySpits[s].active = 0;
+            continue;
+        }
+        enemySpits[s].x += enemySpits[s].vx;
+        if (enemySpits[s].x < 0 || enemySpits[s].x > MW * TS ||
+            boxhit(enemySpits[s].x, enemySpits[s].y, 8, 6)) {
+            enemySpits[s].active = 0;
+            continue;
+        }
+        if (overlap(enemySpits[s].x, enemySpits[s].y, 8, 6, px, py, PW, PH)) {
+            enemySpits[s].active = 0;
+            hurt();
+        }
+    }
+
     int tonx = face > 0 ? px + PW : px - 28;
+    int enemySpeed = hardMode ? 2 : 1;
+
     for (int i = 0; i < ne; i++) {
         Enemy *e = &en[i];
         if (!e->alive) continue;
         e->anim++;
 
-        int nex = e->x + e->dir;
-        int ahead = e->dir > 0 ? nex + 24 : nex;
-        if (boxhit(nex, e->y, 24, 20) || !solid(ahead / TS, (e->y + 20) / TS)) {
-            e->dir = -e->dir;
-        } else {
-            e->x = nex;
+        if (e->graceTimer > 0) {
+            e->graceTimer--;
+        }
+        if (e->lickTimer > 0) {
+            e->lickTimer--;
+        }
+        if (e->lickCooldown > 0) {
+            e->lickCooldown--;
+        }
+        if (e->spitCooldown > 0) {
+            e->spitCooldown--;
         }
 
+        // Faster movement in Hard Mode
+        for (int step = 0; step < enemySpeed; step++) {
+            int nex = e->x + e->dir;
+            int ahead = e->dir > 0 ? nex + 24 : nex;
+            if (boxhit(nex, e->y, 24, 20) || !solid(ahead / TS, (e->y + 20) / TS)) {
+                e->dir = -e->dir;
+                break;
+            } else {
+                e->x = nex;
+            }
+        }
+
+        // Hard Mode enemy lick & spit attacks (respecting grace period & regen timers)
+        if (hardMode && e->graceTimer == 0) {
+            int dx = px - e->x;
+            int dy = abs((py + PH / 2) - (e->y + 10));
+            if (abs(dx) < 150 && dy < 36) {
+                e->dir = (dx >= 0) ? 1 : -1;
+            }
+
+            if (e->lickCooldown == 0 && e->lickTimer == 0 && abs(dx) <= 44 && dy <= 20) {
+                e->lickTimer = ENEMY_LICK_ACTIVE;
+                e->lickCooldown = ENEMY_LICK_REGEN;
+            }
+
+            if (e->spitCooldown == 0 && abs(dx) <= 136 && dy <= 26) {
+                tryEnemyFireSpit(e);
+                e->spitCooldown = ENEMY_SPIT_REGEN;
+            }
+        }
+
+        // Player lick hits enemy
         if (lick > 0 && overlap(tonx, py + 10, 28, 8, e->x, e->y, 24, 20)) {
             e->alive = 0;
-            score += 100;
+            score += hardMode ? 150 : 100;
             continue;
         }
 
+        // Enemy lick hitbox hurts player
+        if (hardMode && e->graceTimer == 0 && e->lickTimer > 0) {
+            int elx = (e->dir > 0) ? (e->x + 24) : (e->x - 24);
+            if (overlap(elx, e->y + 9, 24, 6, px, py, PW, PH)) {
+                hurt();
+            }
+        }
+
+        // Direct enemy contact (no damage while enemy is in 2s spawn grace period)
         if (overlap(px, py, PW, PH, e->x, e->y, 24, 20)) {
             if (vy16 > 0 && (py + PH) - e->y < 15) {
                 e->alive = 0;
-                score += 100;
-                vy16 = -84;
+                score += hardMode ? 150 : 100;
+                vy16 = -88;
                 ground = 0;
-            } else {
+            } else if (e->graceTimer == 0) {
                 hurt();
             }
         }
@@ -523,7 +760,10 @@ static void updatePlay(int held, int down, int touched, int tx, int ty) {
         if (health <= 0) state = 4;
         else resetPlayer();
     }
-    if (px >= 61 * TS) state = 3;
+    if (px >= 61 * TS) {
+        score += 250 * levelNum;
+        state = 3;
+    }
 }
 
 // ---- Regenerating bar inside 112x32 SPIT button sprite ----
@@ -567,7 +807,6 @@ static void drawSpitBarFill(u16 *dst, int bx, int by, int charge, int maxCharge)
 
 // ---- Multi-layer 3D depth parallax (far sky -> painted clouds -> near clouds -> player) ----
 static void drawSkyAndClouds(int camx) {
-    // Layer 1 (farthest): slow scrolling sky & distant hills
     int skyScroll = (camx / 5) & 255;
     for (int y = 0; y < SH; y++) {
         const u16 *srcRow = skyBitmap + y * SW;
@@ -579,7 +818,6 @@ static void drawSkyAndClouds(int camx) {
         }
     }
 
-    // Layer 2 (mid-far): extra drifting clouds from skyBitmap's upper cloud band
     int midScroll = (camx / 3) & 255;
     for (int y = 12; y < 76; y++) {
         const u16 *srcRow = skyBitmap + y * SW;
@@ -595,7 +833,6 @@ static void drawSkyAndClouds(int camx) {
         }
     }
 
-    // Layer 3 (near): foreground cloud sprites moving faster for 3D depth
     for (int i = 0; i < 4; i++) {
         int span = SW + 140;
         int cx = (((i * 210 - (camx * 2) / 3) % span) + span) % span - 70;
@@ -605,19 +842,21 @@ static void drawSkyAndClouds(int camx) {
 }
 
 static void drawTileTextured(int sx, int sy, int r, int c, u8 t) {
-    (void)c;
     if (t == '#') {
         int hasTop = (r == 0 || map[r - 1][c] != '#');
-        if (hasTop) {
-            drawBmp16(buf, (const u16 *)dirtBitmap, 16, 16, sx, sy, 0);
-        } else {
-            // Sub-surface rows reuse rows 5..15 of dirtBitmap so grass only appears on top surface
-            for (int j = 0; j < TS; j++) {
-                int srcY = 5 + (j % 11);
-                for (int i = 0; i < TS; i++) {
-                    u16 col = dirtBitmap[srcY * TS + i];
-                    px_set(buf, sx + i, sy + j, col);
+        for (int j = 0; j < TS; j++) {
+            for (int i = 0; i < TS; i++) {
+                u32 h = hash2d(c * TS + i, r * TS + j);
+                u16 col;
+                if (hasTop && j < 4) {
+                    if (j == 0) col = GRASS_HI;
+                    else col = ((h & 3) == 0) ? GRASS_HI : GRASS_MD;
+                } else {
+                    if ((h & 15) == 0) col = DIRT_DK;
+                    else if ((h & 15) == 1) col = DIRT_HI;
+                    else col = DIRT_MD;
                 }
+                px_set(buf, sx + i, sy + j, col);
             }
         }
     } else if (t == '=') {
@@ -656,19 +895,36 @@ static void drawPlay(void) {
     rect(buf, 62 * TS + 9 - camx, 80, 22, 14, LICKC);
     rect(buf, 62 * TS + 9 - camx, 80, 22, 3, PINK);
 
-    // Lemon enemies (32x32 sprite)
+    // Lemon enemies (32x32 sprite) + grace blink + Hard Mode lick tongue
     for (int i = 0; i < ne; i++) {
         if (!en[i].alive) continue;
+        if (en[i].graceTimer > 0 && ((en[i].graceTimer / 4) % 2) == 1) continue;
         int bob = ((en[i].anim / 6) % 2 == 0) ? 0 : -1;
         drawBmp16(buf, (const u16 *)lemonBitmap, 32, 32, en[i].x - camx - 4, en[i].y - 12 + bob, en[i].dir > 0);
+
+        if (hardMode && en[i].lickTimer > 0) {
+            int elx = ((en[i].dir > 0) ? (en[i].x + 24) : (en[i].x - 24)) - camx;
+            int ely = en[i].y + 9;
+            rect(buf, elx, ely, 24, 6, HARD_RED);
+            rect(buf, elx, ely, 24, 2, YEL);
+        }
     }
 
-    // Spit projectiles
+    // Player spit projectiles
     for (int s = 0; s < MAX_SPITS; s++) {
         if (!spits[s].active) continue;
         int sx = spits[s].x - camx;
         int sy = spits[s].y;
         rect(buf, sx, sy, 8, 6, LEMON_FL);
+        rect(buf, sx + 1, sy + 1, 6, 4, YEL);
+    }
+
+    // Hard Mode enemy spit projectiles
+    for (int s = 0; s < MAX_ENEMY_SPITS; s++) {
+        if (!enemySpits[s].active) continue;
+        int sx = enemySpits[s].x - camx;
+        int sy = enemySpits[s].y;
+        rect(buf, sx, sy, 8, 6, HARD_RED);
         rect(buf, sx + 1, sy + 1, 6, 4, YEL);
     }
 
@@ -679,7 +935,7 @@ static void drawPlay(void) {
         drawBmp16(buf, (const u16 *)cowBitmap, 48, 40, drawX, drawY, face < 0);
     }
 
-    // Lick tongue
+    // Player lick tongue
     if (lick > 0) {
         int lx = (face > 0 ? px + PW : px - 28) - camx;
         int ly = py + 11;
@@ -688,10 +944,10 @@ static void drawPlay(void) {
     }
 
     // Top HUD
-    char s[40];
-    snprintf(s, sizeof s, "SCORE:%06d  %s", score, dsiMode ? "DSI 133" : "DS 67");
+    char s[48];
+    snprintf(s, sizeof s, "L%d %06d %s", levelNum, score, hardMode ? "HARD" : "NORM");
     text(buf, s, 7, 5, 2, BLK);
-    text(buf, s, 6, 4, 2, WHT);
+    text(buf, s, 6, 4, 2, hardMode ? HARD_RED : WHT);
 
     rect(buf, 238, 18, 14, 70, BLK);
     for (int i = 0; i < health; i++) {
@@ -715,7 +971,8 @@ static void drawTitle(void) {
     dmaCopy(skyBitmap, buf, SW * SH * sizeof(u16));
     drawBmp16(buf, (const u16 *)logoBitmap, 208, 48, 24, 34, 0);
     drawBmp16(buf, (const u16 *)cowBitmap, 48, 40, 104, 102, 0);
-    text(buf, dsiMode ? "DSI MODE ACTIVE" : "NDS MODE", 66, 156, 2, YEL);
+    text(buf, hardMode ? "HARD MODE: ON" : "HARD MODE: OFF", 48, 152, 2, hardMode ? HARD_RED : YEL);
+    text(buf, "X TO TOGGLE HARD", 64, 170, 1, WHT);
 
     rect(sbuf, 0, 0, SW, SH, SUBBG);
     if ((frame / 30) % 2 == 0) {
@@ -730,7 +987,9 @@ static void drawSub(void) {
     if (camx > MW * TS - SW) camx = MW * TS - SW;
 
     rect(sbuf, 0, 0, SW, SH, SUBBG);
-    text(sbuf, "LEVEL 1-1", 92, 6, 2, WHT);
+    char hdr[36];
+    snprintf(hdr, sizeof hdr, "WORLD %d SEED:%u", levelNum, (unsigned)(levelSeed % 100000u));
+    text(sbuf, hdr, 28, 6, 2, WHT);
 
     for (int i = 0; i < health; i++) {
         rect(sbuf, 8 + i * 14, 20, 10, 7, LICKC);
@@ -760,7 +1019,7 @@ static void drawSub(void) {
     rect(sbuf, 32 + camx * 3 / TS, 69, SW * 3 / TS, 1, WHT);
 
     text(sbuf, "A JUMP B LICK L/R SPIT", 14, 78, 1, WHT);
-    text(sbuf, "SELECT OR TAP RADIO", 36, 88, 1, YEL);
+    text(sbuf, hardMode ? "X HARD:ON SEL RADIO" : "X HARD:OFF SEL RADIO", 24, 88, 1, hardMode ? HARD_RED : YEL);
 
     // 112x32 SPIT button + regenerating fill inside its inner bar slot
     int spitX = 132;
@@ -809,7 +1068,8 @@ int main(void) {
         sfb[i] = C(0, 0, 0);
     }
 
-    buildLevel();
+    baseSeed = 0x1337BEEFu;
+    buildLevel(1, baseSeed + 1u);
     bootTimer = BOOT_FRAMES;
     state = -1;
 
@@ -833,15 +1093,22 @@ int main(void) {
             }
         } else if (state == 0) {
             if (down & KEY_SELECT) toggleRadio();
+            if (down & KEY_X) toggleHardMode();
             if (down & KEY_START) newGame();
             else drawTitle();
         } else {
             if (state == 1) updatePlay(held, down, touched, tx, ty);
             drawPlay();
             drawSub();
-            if (state == 3) text(buf, "YOU WIN!", 48, 70, 5, WHT);
-            if (state == 4) text(buf, "GAME OVER", 40, 70, 5, WHT);
-            if (state >= 3) {
+            if (state == 3) {
+                text(buf, "LEVEL CLEAR!", 28, 70, 4, WHT);
+                text(buf, "PRESS START NEXT SEED", 34, 120, 2, YEL);
+                if (down & KEY_START) {
+                    startLevel(levelNum + 1, baseSeed + (u32)((levelNum + 1) * 7919u), 0);
+                }
+            }
+            if (state == 4) {
+                text(buf, "GAME OVER", 40, 70, 5, WHT);
                 text(buf, "PRESS START", 85, 120, 2, WHT);
                 if (down & KEY_START) state = 0;
             }
