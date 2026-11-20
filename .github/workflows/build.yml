@@ -11,16 +11,51 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Convert PNG assets with grit
+            - name: Convert PNG assets to C bitmaps
         run: |
-          export PATH="/opt/wonderful/bin:$PATH"
-          if [ -f /opt/wonderful/env.sh ]; then
-            . /opt/wonderful/env.sh
-          fi
-          mkdir -p source/gfx
-          for f in graphics/*.png; do
-            grit "$f" -gb -gB16 -gT! -ftc -o "source/gfx/$(basename "${f%.png}")"
-          done
+          python3 -c "import PIL" 2>/dev/null || pip install --break-system-packages pillow
+          python3 - <<'EOF'
+          import glob
+          import os
+          from PIL import Image
+
+          os.makedirs("source/gfx", exist_ok=True)
+
+          for path in sorted(glob.glob("graphics/*.png")):
+              name = os.path.splitext(os.path.basename(path))[0]
+              img = Image.open(path).convert("RGBA")
+              w, h = img.size
+              pixels = img.load()
+
+              vals = []
+              for y in range(h):
+                  for x in range(w):
+                      r, g, b, a = pixels[x, y]
+                      if a < 128:
+                          vals.append("0x0000")
+                      else:
+                          r5 = r >> 3
+                          g5 = g >> 3
+                          b5 = b >> 3
+                          rgb15 = 0x8000 | (b5 << 10) | (g5 << 5) | r5
+                          vals.append(f"0x{rgb15:04X}")
+
+              with open(f"source/gfx/{name}.h", "w") as hf:
+                  hf.write(f"#pragma once\n")
+                  hf.write(f"#define {name.upper()}_BITMAP_WIDTH {w}\n")
+                  hf.write(f"#define {name.upper()}_BITMAP_HEIGHT {h}\n")
+                  hf.write(f"extern const unsigned short {name}Bitmap[{w * h}];\n")
+
+              with open(f"source/gfx/{name}.c", "w") as cf:
+                  cf.write(f'#include "{name}.h"\n\n')
+                  cf.write(f"const unsigned short {name}Bitmap[{w * h}] = {{\n")
+                  for i in range(0, len(vals), 12):
+                      cf.write("    " + ", ".join(vals[i:i+12]) + ",\n")
+                  cf.write("};\n")
+
+              print(f"Converted {path} -> source/gfx/{name}.h/.c ({w}x{h})")
+          EOF
+          
 
       - name: Build NDS ROM
         run: |
