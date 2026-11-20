@@ -13,141 +13,256 @@ jobs:
 
       - name: Convert PNG assets to C bitmaps
         run: |
-          python3 - <<'EOF'
-          import glob
-          import os
-          import struct
-          import zlib
+          mkdir -p source/gfx /tmp/png2c_src
 
-          def paeth(a, b, c):
-              p = a + b - c
-              pa = abs(p - a)
-              pb = abs(p - b)
-              pc = abs(p - c)
-              if pa <= pb and pa <= pc:
-                  return a
-              if pb <= pc:
-                  return b
-              return c
+          cat <<'EOF' > /tmp/png2c_src/png2c.c
+          #include <stdint.h>
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <string.h>
+          #include <ctype.h>
+          #include <zlib.h>
 
-          def load_png_rgba(path):
-              with open(path, "rb") as f:
-                  data = f.read()
-              if data[:8] != b"\x89PNG\r\n\x1a\n":
-                  raise ValueError(f"{path} is not a valid PNG")
+          static uint32_t read_be32(const uint8_t *p) {
+              return ((uint32_t)p[0] << 24) |
+                     ((uint32_t)p[1] << 16) |
+                     ((uint32_t)p[2] << 8)  |
+                     ((uint32_t)p[3]);
+          }
 
-              pos = 8
-              w = h = bit_depth = color_type = None
-              idat = bytearray()
+          static int paeth(int a, int b, int c) {
+              int p = a + b - c;
+              int pa = abs(p - a);
+              int pb = abs(p - b);
+              int pc = abs(p - c);
+              if (pa <= pb && pa <= pc) return a;
+              if (pb <= pc) return b;
+              return c;
+          }
 
-              while pos < len(data):
-                  length, chunk_type = struct.unpack(">I4s", data[pos:pos+8])
-                  chunk_data = data[pos+8:pos+8+length]
-                  pos += 12 + length
+          static void basename_no_ext(const char *path, char *out, size_t out_sz) {
+              const char *slash = strrchr(path, '/');
+              const char *base = slash ? slash + 1 : path;
+              const char *dot = strrchr(base, '.');
+              size_t len = dot ? (size_t)(dot - base) : strlen(base);
+              if (len >= out_sz) len = out_sz - 1;
+              memcpy(out, base, len);
+              out[len] = '\0';
+          }
 
-                  if chunk_type == b"IHDR":
-                      w, h, bit_depth, color_type, _, _, _ = struct.unpack(">IIBBBBB", chunk_data)
-                      if bit_depth != 8 or color_type not in (2, 6):
-                          raise ValueError(f"{path}: unsupported bit_depth={bit_depth}, color_type={color_type}")
-                  elif chunk_type == b"IDAT":
-                      idat.extend(chunk_data)
-                  elif chunk_type == b"IEND":
-                      break
+          static void to_upper_str(const char *src, char *dst, size_t dst_sz) {
+              size_t i = 0;
+              for (; src[i] && i + 1 < dst_sz; i++) {
+                  dst[i] = (char)toupper((unsigned char)src[i]);
+              }
+              dst[i] = '\0';
+          }
 
-              raw = zlib.decompress(bytes(idat))
-              bpp = 4 if color_type == 6 else 3
-              stride = w * bpp
-              recon = bytearray(h * stride)
+          static int convert_one(const char *png_path) {
+              FILE *f = fopen(png_path, "rb");
+              if (!f) {
+                  fprintf(stderr, "Failed to open %s\n", png_path);
+                  return 1;
+              }
+              if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return 1; }
+              long fsize = ftell(f);
+              rewind(f);
+              if (fsize < 24) { fclose(f); return 1; }
 
-              idx = 0
-              for y in range(h):
-                  ftype = raw[idx]
-                  idx += 1
-                  row_start = y * stride
-                  prev_start = (y - 1) * stride
+              uint8_t *file_buf = (uint8_t *)malloc((size_t)fsize);
+              if (!file_buf) { fclose(f); return 1; }
+              if (fread(file_buf, 1, (size_t)fsize, f) != (size_t)fsize) {
+                  free(file_buf);
+                  fclose(f);
+                  return 1;
+              }
+              fclose(f);
 
-                  for x in range(stride):
-                      val = raw[idx]
-                      idx += 1
-                      a = recon[row_start + x - bpp] if x >= bpp else 0
-                      b = recon[prev_start + x] if y > 0 else 0
-                      c = recon[prev_start + x - bpp] if (y > 0 and x >= bpp) else 0
+              static const uint8_t sig[8] = {137, 80, 78, 71, 13, 10, 26, 10};
+              if (memcmp(file_buf, sig, 8) != 0) {
+                  fprintf(stderr, "%s is not a valid PNG\n", png_path);
+                  free(file_buf);
+                  return 1;
+              }
 
-                      if ftype == 0:
-                          out = val
-                      elif ftype == 1:
-                          out = (val + a) & 0xFF
-                      elif ftype == 2:
-                          out = (val + b) & 0xFF
-                      elif ftype == 3:
-                          out = (val + ((a + b) >> 1)) & 0xFF
-                      elif ftype == 4:
-                          out = (val + paeth(a, b, c)) & 0xFF
-                      else:
-                          raise ValueError(f"{path}: unsupported PNG filter type {ftype}")
+              uint32_t w = 0, h = 0;
+              uint8_t bit_depth = 0, color_type = 0;
+              int got_ihdr = 0;
 
-                      recon[row_start + x] = out
+              uint8_t *idat_buf = NULL;
+              size_t idat_len = 0;
 
-              out_pixels = []
-              for y in range(h):
-                  row = []
-                  row_start = y * stride
-                  for x in range(w):
-                      p = row_start + x * bpp
-                      r = recon[p]
-                      g = recon[p + 1]
-                      b = recon[p + 2]
-                      a = recon[p + 3] if bpp == 4 else 255
-                      row.append((r, g, b, a))
-                  out_pixels.append(row)
+              size_t pos = 8;
+              while (pos + 12 <= (size_t)fsize) {
+                  uint32_t chunk_len = read_be32(file_buf + pos);
+                  const uint8_t *type_ptr = file_buf + pos + 4;
+                  if (pos + 12 + (size_t)chunk_len > (size_t)fsize) {
+                      fprintf(stderr, "Truncated chunk in %s\n", png_path);
+                      free(idat_buf);
+                      free(file_buf);
+                      return 1;
+                  }
+                  const uint8_t *data_ptr = file_buf + pos + 8;
 
-              return w, h, out_pixels
+                  if (memcmp(type_ptr, "IHDR", 4) == 0) {
+                      if (chunk_len < 13) {
+                          free(idat_buf);
+                          free(file_buf);
+                          return 1;
+                      }
+                      w = read_be32(data_ptr);
+                      h = read_be32(data_ptr + 4);
+                      bit_depth = data_ptr[8];
+                      color_type = data_ptr[9];
+                      got_ihdr = 1;
+                  } else if (memcmp(type_ptr, "IDAT", 4) == 0) {
+                      uint8_t *next_idat = (uint8_t *)realloc(idat_buf, idat_len + chunk_len);
+                      if (!next_idat) {
+                          free(idat_buf);
+                          free(file_buf);
+                          return 1;
+                      }
+                      idat_buf = next_idat;
+                      memcpy(idat_buf + idat_len, data_ptr, chunk_len);
+                      idat_len += chunk_len;
+                  } else if (memcmp(type_ptr, "IEND", 4) == 0) {
+                      break;
+                  }
 
-          os.makedirs("source/gfx", exist_ok=True)
+                  pos += 12 + (size_t)chunk_len;
+              }
 
-          for path in sorted(glob.glob("graphics/*.png")):
-              name = os.path.splitext(os.path.basename(path))[0]
-              w, h, pixels = load_png_rgba(path)
+              if (!got_ihdr || bit_depth != 8 || (color_type != 2 && color_type != 6) || !idat_buf) {
+                  fprintf(stderr, "%s: unsupported PNG (depth=%u, type=%u)\n", png_path, bit_depth, color_type);
+                  free(idat_buf);
+                  free(file_buf);
+                  return 1;
+              }
 
-              vals = []
-              for y in range(h):
-                  for x in range(w):
-                      r, g, b, a = pixels[y][x]
-                      if a < 128:
-                          vals.append("0x0000")
-                      else:
-                          r5 = r >> 3
-                          g5 = g >> 3
-                          b5 = b >> 3
-                          rgb15 = 0x8000 | (b5 << 10) | (g5 << 5) | r5
-                          vals.append(f"0x{rgb15:04X}")
+              int bpp = (color_type == 6) ? 4 : 3;
+              size_t stride = (size_t)w * (size_t)bpp;
+              size_t raw_cap = (size_t)h * (stride + 1) + 64;
+              uint8_t *raw = (uint8_t *)malloc(raw_cap);
+              uLongf raw_len = (uLongf)raw_cap;
 
-              with open(f"source/gfx/{name}.h", "w") as hf:
-                  hf.write("#pragma once\n")
-                  hf.write(f"#define {name.upper()}_BITMAP_WIDTH {w}\n")
-                  hf.write(f"#define {name.upper()}_BITMAP_HEIGHT {h}\n")
-                  hf.write(f"extern const unsigned short {name}Bitmap[{w * h}];\n")
+              while (1) {
+                  int zres = uncompress(raw, &raw_len, idat_buf, (uLong)idat_len);
+                  if (zres == Z_OK) break;
+                  if (zres == Z_BUF_ERROR) {
+                      raw_cap *= 2;
+                      uint8_t *bigger = (uint8_t *)realloc(raw, raw_cap);
+                      if (!bigger) {
+                          free(raw);
+                          free(idat_buf);
+                          free(file_buf);
+                          return 1;
+                      }
+                      raw = bigger;
+                      raw_len = (uLongf)raw_cap;
+                      continue;
+                  }
+                  fprintf(stderr, "%s: zlib uncompress failed (%d)\n", png_path, zres);
+                  free(raw);
+                  free(idat_buf);
+                  free(file_buf);
+                  return 1;
+              }
 
-              with open(f"source/gfx/{name}.c", "w") as cf:
-                  cf.write(f'#include "{name}.h"\n\n')
-                  cf.write(f"const unsigned short {name}Bitmap[{w * h}] = {{\n")
-                  for i in range(0, len(vals), 12):
-                      cf.write("    " + ", ".join(vals[i:i+12]) + ",\n")
-                  cf.write("};\n")
+              uint8_t *recon = (uint8_t *)calloc((size_t)h * stride + 1, 1);
+              if (!recon) {
+                  free(raw);
+                  free(idat_buf);
+                  free(file_buf);
+                  return 1;
+              }
 
-              print(f"Converted {path} -> source/gfx/{name}.h/.c ({w}x{h})")
-          EOF
+              size_t idx = 0;
+              for (uint32_t y = 0; y < h; y++) {
+                  if (idx >= raw_len) {
+                      fprintf(stderr, "%s: unexpected end of decompressed PNG data\n", png_path);
+                      free(recon);
+                      free(raw);
+                      free(idat_buf);
+                      free(file_buf);
+                      return 1;
+                  }
+                  uint8_t ftype = raw[idx++];
+                  size_t row_start = (size_t)y * stride;
+                  size_t prev_start = (y > 0) ? ((size_t)(y - 1) * stride) : 0;
 
-      - name: Build NDS ROM
-        run: |
-          export PATH="/opt/wonderful/bin:$PATH"
-          if [ -f /opt/wonderful/env.sh ]; then
-            . /opt/wonderful/env.sh
-          fi
-          make
+                  for (size_t x = 0; x < stride; x++) {
+                      if (idx >= raw_len) {
+                          free(recon);
+                          free(raw);
+                          free(idat_buf);
+                          free(file_buf);
+                          return 1;
+                      }
+                      int val = raw[idx++];
+                      int a = (x >= (size_t)bpp) ? recon[row_start + x - (size_t)bpp] : 0;
+                      int b = (y > 0) ? recon[prev_start + x] : 0;
+                      int c = (y > 0 && x >= (size_t)bpp) ? recon[prev_start + x - (size_t)bpp] : 0;
+                      int out = 0;
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: cowgame3-ds
-          path: cowgame3.nds
-          
+                      if (ftype == 0) out = val;
+                      else if (ftype == 1) out = (val + a) & 0xFF;
+                      else if (ftype == 2) out = (val + b) & 0xFF;
+                      else if (ftype == 3) out = (val + ((a + b) >> 1)) & 0xFF;
+                      else if (ftype == 4) out = (val + paeth(a, b, c)) & 0xFF;
+                      else {
+                          fprintf(stderr, "%s: unsupported PNG filter %u\n", png_path, ftype);
+                          free(recon);
+                          free(raw);
+                          free(idat_buf);
+                          free(file_buf);
+                          return 1;
+                      }
+                      recon[row_start + x] = (uint8_t)out;
+                  }
+              }
+
+              char name[128];
+              char upper[128];
+              basename_no_ext(png_path, name, sizeof(name));
+              to_upper_str(name, upper, sizeof(upper));
+
+              char h_path[256];
+              char c_path[256];
+              snprintf(h_path, sizeof(h_path), "source/gfx/%s.h", name);
+              snprintf(c_path, sizeof(c_path), "source/gfx/%s.c", name);
+
+              FILE *hf = fopen(h_path, "w");
+              FILE *cf = fopen(c_path, "w");
+              if (!hf || !cf) {
+                  if (hf) fclose(hf);
+                  if (cf) fclose(cf);
+                  free(recon);
+                  free(raw);
+                  free(idat_buf);
+                  free(file_buf);
+                  return 1;
+              }
+
+              uint32_t total = w * h;
+              fprintf(hf, "#pragma once\n");
+              fprintf(hf, "#define %s_BITMAP_WIDTH %u\n", upper, w);
+              fprintf(hf, "#define %s_BITMAP_HEIGHT %u\n", upper, h);
+              fprintf(hf, "extern const unsigned short %sBitmap[%u];\n", name, total);
+
+              fprintf(cf, "#include \"%s.h\"\n\n", name);
+              fprintf(cf, "const unsigned short %sBitmap[%u] = {\n", name, total);
+
+              for (uint32_t i = 0; i < total; i++) {
+                  size_t p = (size_t)i * (size_t)bpp;
+                  uint8_t r = recon[p];
+                  uint8_t g = recon[p + 1];
+                  uint8_t b = recon[p + 2];
+                  uint8_t a = (bpp == 4) ? recon[p + 3] : 255;
+
+                  uint16_t out_px = 0x0000;
+                  if (a >= 128) {
+                      uint16_t r5 = r >> 3;
+                      uint16_t g5 = g >> 3;
+                      uint16_t b5 = b >> 3;
+                      out_px = (uint16_t)(0x8000 | (b
+                      
