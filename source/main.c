@@ -18,7 +18,7 @@
 #define COYOTE_FRAMES 6
 #define JUMP_BUFFER_FRAMES 6
 
-// Audio synthesis settings (8-bit signed PCM loop, ~11025 Hz, ~4.0s loop)
+// Audio synthesis settings (8-bit signed PCM loop, ~11025 Hz, 4.0s loop)
 #define AUDIO_RATE 11025
 #define AUDIO_SECONDS 4
 #define AUDIO_SAMPLES (AUDIO_RATE * AUDIO_SECONDS)
@@ -36,10 +36,8 @@
 #define DYEL      C(24, 20, 2)
 #define LEMON_FL  C(31, 31, 18)
 #define GRN       C(5, 20, 5)
-#define DGRN      C(3, 13, 3)
 #define HORN      C(20, 17, 12)
 #define PINK      C(30, 18, 18)
-#define DPINK     C(25, 11, 12)
 #define UDD       C(31, 22, 22)
 #define DIRT_HI   C(19, 12, 6)
 #define DIRT_MD   C(16, 10, 5)
@@ -51,7 +49,6 @@
 #define PLAT_DK   C(12, 14, 20)
 #define GOLD      C(31, 24, 2)
 #define SUBBG     C(4, 8, 18)
-#define SUBPANEL  C(7, 13, 26)
 #define BTN       C(8, 15, 29)
 #define BTN_ON    C(7, 22, 13)
 #define BTN_OFF   C(16, 10, 12)
@@ -141,7 +138,7 @@ static void rect(u16 *b, int x, int y, int w, int h, u16 c) {
 static u16 pal(char ch) {
     switch (ch) {
         case 'Y': return YEL;   case 'y': return DYEL;  case 'G': return GRN;
-        case 'H': return HORN;  case 'P': return PINK;  case 'p': return DPINK;
+        case 'H': return HORN;  case 'P': return PINK;  case 'p': return LICKC;
         case 'W': return WHT;   case 'K': return BLK;   case 'E': return BLK;
         case 'U': return UDD;   default: return 0;
     }
@@ -153,7 +150,6 @@ static void sprite(u16 *b, const char **s, int w, int h, int x, int y, int sc, i
             char ch = s[j][flip ? w - 1 - i : i];
             if (ch == '.') continue;
             u16 col = pal(ch);
-            // Add subtle top-left highlight and bottom-right shadow on scaled pixels
             for (int sy = 0; sy < sc; sy++) {
                 for (int sx = 0; sx < sc; sx++) {
                     u16 out = col;
@@ -184,7 +180,6 @@ static void text(u16 *b, const char *s, int x, int y, int sc, u16 col) {
 }
 
 // ---- Bit-crushed Portal-radio chiptune generator ----
-// Quirky 16-step melody + bass in D minor / Dorian-ish hops, crushed to ~6-bit sample-and-hold
 static float midi_to_freq(int midi) {
     return 440.0f * powf(2.0f, (midi - 69) / 12.0f);
 }
@@ -193,7 +188,6 @@ static void buildRadioLoop(void) {
     radioPcm = (s8 *)malloc(AUDIO_SAMPLES);
     if (!radioPcm) return;
 
-    // 16 steps over 4.0 seconds (0.25s per step)
     static const int lead_notes[16] = {
         62, 65, 69, 74,  72, 69, 67, 65,
         62, 65, 70, 74,  76, 74, 69, 65
@@ -205,13 +199,13 @@ static void buildRadioLoop(void) {
 
     const int steps = 16;
     const int samples_per_step = AUDIO_SAMPLES / steps;
-    const int hold_factor = 7; // sample-rate decimation for gritty radio crunch
-    const int bit_levels = 32; // ~5-6 bit quantization steps
+    const int hold_factor = 7;
+    const int bit_levels = 32;
 
     float lead_phase = 0.0f;
     float bass_phase = 0.0f;
     float held_sample = 0.0f;
-    u32 rng = 0x504F5254u; // "PORT"
+    u32 rng = 0x504F5254u;
 
     for (int n = 0; n < AUDIO_SAMPLES; n++) {
         int step = (n / samples_per_step) % steps;
@@ -227,22 +221,18 @@ static void buildRadioLoop(void) {
         bass_phase += f_bass / (float)AUDIO_RATE;
         if (bass_phase >= 1.0f) bass_phase -= 1.0f;
 
-        // Narrow pulse wave for quirky radio lead + triangle/square bass
         float pulse = (lead_phase < 0.25f) ? 0.65f : -0.65f;
         float tri = (bass_phase < 0.5f)
             ? (-1.0f + 4.0f * bass_phase)
             : (3.0f - 4.0f * bass_phase);
 
-        // Subtle radio static noise
         rng = rng * 1664525u + 1013904223u;
         float noise = (((int)(rng >> 24)) - 128) / 128.0f;
 
         float raw = (pulse * 0.42f * env) + (tri * 0.35f) + (noise * 0.07f);
 
-        // Sample-and-hold decimation + bit crush
         if ((n % hold_factor) == 0) {
             float crushed = floorf(raw * (float)bit_levels + 0.5f) / (float)bit_levels;
-            // Soft warm saturation like a small speaker cone
             held_sample = crushed / (1.0f + 0.35f * fabsf(crushed));
         }
 
@@ -264,10 +254,10 @@ static void startRadioLoop(void) {
         SoundFormat_8Bit,
         AUDIO_SAMPLES,
         AUDIO_RATE,
-        58,     // volume (0..127)
-        64,     // center pan (0..127)
-        true,   // loop continuously
-        0       // loop start sample
+        58,
+        64,
+        true,
+        0
     );
 }
 
@@ -291,7 +281,6 @@ static int ne;
 static int x16, y16, vx16, vy16, face, ground, inv, lick;
 static int coyoteTimer, jumpBufferTimer;
 static int score, health, state, paused, frame;
-// state: 0 title, 1 playing, 3 win, 4 game over
 
 static void buildLevel(void) {
     memset(map, 0, sizeof map);
@@ -388,7 +377,7 @@ static void updatePlay(int held, int down, int touched, int tx, int ty) {
     if (down & KEY_SELECT) {
         toggleRadio();
     }
-    if (touched && tx >= 186 && tx < 246 && ty >= 150 && ty < 176) {
+    if (touched && tx >= 182 && tx < 246 && ty >= 150 && ty < 176) {
         toggleRadio();
     }
     if ((touched && tx >= 10 && tx < 70 && ty >= 150 && ty < 176) || (down & KEY_START)) {
@@ -396,7 +385,6 @@ static void updatePlay(int held, int down, int touched, int tx, int ty) {
     }
     if (paused) return;
 
-    // Horizontal movement
     int want = 0;
     if (held & KEY_LEFT)  { want = -28; face = -1; }
     if (held & KEY_RIGHT) { want = 28;  face = 1; }
@@ -406,7 +394,6 @@ static void updatePlay(int held, int down, int touched, int tx, int ty) {
     if (!boxhit(nx >> 4, y16 >> 4, PW, PH)) {
         x16 = nx;
     } else {
-        // Snap flush against wall so horizontal collisions don't snag vertical movement
         if (vx16 > 0) {
             int wall_tx = ((nx >> 4) + PW - 1) / TS;
             x16 = (wall_tx * TS - PW) << 4;
@@ -417,7 +404,6 @@ static void updatePlay(int held, int down, int touched, int tx, int ty) {
         vx16 = 0;
     }
 
-    // Jump buffering & coyote time
     if (down & KEY_A) {
         jumpBufferTimer = JUMP_BUFFER_FRAMES;
     } else if (jumpBufferTimer > 0) {
@@ -437,22 +423,18 @@ static void updatePlay(int held, int down, int touched, int tx, int ty) {
         jumpBufferTimer = 0;
     }
 
-    // Variable jump cut when A is released early while ascending
     if (!(held & KEY_A) && vy16 < -42) {
         vy16 = -42;
     }
 
-    // Gravity
     vy16 += 5;
     if (vy16 > 140) vy16 = 140;
 
-    // Lick attack
     if (lick == 0 && ((down & (KEY_B | KEY_Y)) || (touched && tx >= 76 && tx < 176 && ty >= 140 && ty < 184))) {
         lick = 14;
     }
     if (lick > 0) lick--;
 
-    // Vertical movement & collision
     int ny = y16 + vy16;
     ground = 0;
     if (!boxhit(x16 >> 4, ny >> 4, PW, PH)) {
@@ -474,7 +456,6 @@ static void updatePlay(int held, int down, int touched, int tx, int ty) {
 
     int px = x16 >> 4, py = y16 >> 4;
 
-    // Lemon slices (coins)
     for (int r = (py < 0 ? 0 : py / TS); r <= (py + PH - 1) / TS && r < MH; r++) {
         for (int c = px / TS; c <= (px + PW - 1) / TS && c < MW; c++) {
             if (map[r][c] == 'o') {
@@ -484,7 +465,6 @@ static void updatePlay(int held, int down, int touched, int tx, int ty) {
         }
     }
 
-    // Enemies
     int tonx = face > 0 ? px + PW : px - 28;
     for (int i = 0; i < ne; i++) {
         Enemy *e = &en[i];
@@ -525,7 +505,6 @@ static void updatePlay(int held, int down, int touched, int tx, int ty) {
     if (px >= 61 * TS) state = 3;
 }
 
-// ---- Textured background & tile drawing ----
 static void drawSkyAndClouds(int camx) {
     for (int y = 0; y < SH; y++) {
         u16 skyCol = (y < 96) ? SKY_TOP : SKY_BOT;
@@ -560,14 +539,12 @@ static void drawTileTextured(int sx, int sy, int r, int c, u8 t) {
             }
         }
     } else if (t == '=') {
-        // Brushed/riveted metal platform texture
         rect(buf, sx, sy, TS, TS, PLAT_MD);
         rect(buf, sx, sy, TS, 3, PLAT_HI);
         rect(buf, sx, sy + TS - 3, TS, 3, PLAT_DK);
         rect(buf, sx + 2, sy + 6, 2, 2, PLAT_HI);
         rect(buf, sx + TS - 4, sy + 6, 2, 2, PLAT_HI);
     } else if (t == 'o') {
-        // Textured golden lemon slice
         rect(buf, sx + 4, sy + 3, 8, 10, GOLD);
         rect(buf, sx + 5, sy + 4, 6, 8, YEL);
         rect(buf, sx + 6, sy + 5, 4, 6, LEMON_FL);
@@ -595,26 +572,22 @@ static void drawPlay(void) {
         }
     }
 
-    // Goal flag
     rect(buf, 62 * TS + 6 - camx, 80, 3, 80, WHT);
     rect(buf, 62 * TS + 9 - camx, 80, 22, 14, LICKC);
     rect(buf, 62 * TS + 9 - camx, 80, 22, 3, PINK);
 
-    // Enemies
     for (int i = 0; i < ne; i++) {
         if (!en[i].alive) continue;
         int bob = ((en[i].anim / 6) % 2 == 0) ? 0 : -1;
         sprite(buf, LEMON, 12, 10, en[i].x - camx, en[i].y + bob, 2, en[i].dir > 0);
     }
 
-    // Player cow (align sprite box to collision box)
     if (inv == 0 || (inv % 6) < 3) {
         int drawX = px - camx - ((32 - PW) / 2);
         int drawY = py - (32 - PH);
         sprite(buf, COW, 16, 16, drawX, drawY, 2, face < 0);
     }
 
-    // Lick tongue
     if (lick > 0) {
         int lx = (face > 0 ? px + PW : px - 28) - camx;
         int ly = py + 11;
@@ -622,7 +595,6 @@ static void drawPlay(void) {
         rect(buf, lx, ly, 28, 2, PINK);
     }
 
-    // Top screen HUD
     char s[40];
     snprintf(s, sizeof s, "SCORE:%06d  %s", score, dsiMode ? "DSI 133" : "DS 67");
     text(buf, s, 7, 5, 2, BLK);
@@ -667,4 +639,48 @@ static void drawSub(void) {
         rect(sbuf, 8 + i * 14, 24, 10, 8, LICKC);
     }
 
-    // 
+    rect(sbuf, 30, 42, 196, 40, BLK);
+    rect(sbuf, 32, 44, 192, 36, SKY_TOP);
+    for (int r = 0; r < MH; r++) {
+        for (int c = 0; c < MW; c++) {
+            u8 t = map[r][c];
+            if (t) {
+                u16 mc = (t == '#') ? DIRT_HI : ((t == '=') ? PLAT_HI : GOLD);
+                rect(sbuf, 32 + c * 3, 44 + r * 3, 3, 3, mc);
+            }
+        }
+    }
+    for (int i = 0; i < ne; i++) {
+        if (en[i].alive) {
+            rect(sbuf, 32 + en[i].x * 3 / TS, 44 + en[i].y * 3 / TS, 3, 3, LICKC);
+        }
+    }
+    if ((frame / 8) % 2 == 0) {
+        rect(sbuf, 32 + px * 3 / TS, 44 + py * 3 / TS, 3, 4, YEL);
+    }
+    rect(sbuf, 32 + camx * 3 / TS, 42, SW * 3 / TS, 1, WHT);
+    rect(sbuf, 32 + camx * 3 / TS, 81, SW * 3 / TS, 1, WHT);
+
+    text(sbuf, "DPAD MOVE A JUMP B LICK", 16, 98, 1, WHT);
+    text(sbuf, "SELECT OR TAP RADIO", 36, 112, 1, YEL);
+
+    rect(sbuf, 10, 150, 60, 26, BTN);
+    text(sbuf, "PAUSE", 18, 159, 2, WHT);
+
+    rect(sbuf, 76, 140, 98, 44, LICKC);
+    text(sbuf, "LICK", 95, 154, 3, WHT);
+
+    rect(sbuf, 182, 150, 64, 26, radioMuted ? BTN_OFF : BTN_ON);
+    text(sbuf, radioMuted ? "MUTE" : "RADIO", 190, 159, 2, WHT);
+}
+
+int main(void) {
+#ifdef ARM9
+    dsiMode = isDSiMode() ? 1 : 0;
+#endif
+    if (dsiMode) {
+        setCpuClock(true);
+    }
+
+    buf  = (u16 *)malloc(SW * SH * sizeof(u16));
+    sbuf = (u16 *)malloc(SW * SH * sizeof(
