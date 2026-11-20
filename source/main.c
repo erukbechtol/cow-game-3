@@ -337,6 +337,8 @@ int main(void) {
     int sbg = bgInitSub(3, BgType_Bmp16, BgSize_B16_256x256, 0, 0);
     u16 *fb  = bgGetGfxPtr(bg);
     u16 *sfb = bgGetGfxPtr(sbg);
+         irqEnable(IRQ_VBLANK);
+    for (int i = 0; i < SW * SH; i++) { fb[i] = C(31,0,0); sfb[i] = C(0,0,31); }
     buildLevel(); state = 0;
 
     while (1) {
