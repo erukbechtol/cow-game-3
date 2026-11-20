@@ -682,5 +682,71 @@ int main(void) {
         setCpuClock(true);
     }
 
-    buf  = (u16 *)malloc(SW * SH * sizeof(u16));
-    sbuf = (u16 *)malloc(SW * SH * sizeof(
+        buf  = (u16 *)malloc(SW * SH * sizeof(u16));
+    sbuf = (u16 *)malloc(SW * SH * sizeof(u16));
+    if (!buf || !sbuf) {
+        while (1) swiWaitForVBlank();
+    }
+
+    videoSetMode(MODE_5_2D | DISPLAY_BG3_ACTIVE);
+    videoSetModeSub(MODE_5_2D | DISPLAY_BG3_ACTIVE);
+    vramSetBankA(VRAM_A_MAIN_BG);
+    vramSetBankC(VRAM_C_SUB_BG);
+
+    int bg  = bgInit(3, BgType_Bmp16, BgSize_B16_256x256, 0, 0);
+    int sbg = bgInitSub(3, BgType_Bmp16, BgSize_B16_256x256, 0, 0);
+    u16 *fb  = bgGetGfxPtr(bg);
+    u16 *sfb = bgGetGfxPtr(sbg);
+
+    irqEnable(IRQ_VBLANK);
+    soundEnable();
+
+    buildRadioLoop();
+    startRadioLoop();
+
+    for (int i = 0; i < SW * SH; i++) {
+        fb[i] = C(0, 0, 0);
+        sfb[i] = C(0, 0, 0);
+    }
+
+    buildLevel();
+    state = 0;
+
+    while (1) {
+        scanKeys();
+        int down = keysDown(), held = keysHeld();
+        int touched = 0, tx = 0, ty = 0;
+        touchPosition tp;
+        if (down & KEY_TOUCH) {
+            touchRead(&tp);
+            touched = 1;
+            tx = tp.px;
+            ty = tp.py;
+        }
+        frame++;
+
+        if (state == 0) {
+            if (down & KEY_SELECT) toggleRadio();
+            if (down & KEY_START) newGame();
+            else drawTitle();
+        } else {
+            if (state == 1) updatePlay(held, down, touched, tx, ty);
+            drawPlay();
+            drawSub();
+            if (state == 3) text(buf, "YOU WIN!", 48, 70, 5, WHT);
+            if (state == 4) text(buf, "GAME OVER", 40, 70, 5, WHT);
+            if (state >= 3) {
+                text(buf, "PRESS START", 85, 120, 2, WHT);
+                if (down & KEY_START) state = 0;
+            }
+        }
+
+        swiWaitForVBlank();
+        DC_FlushRange(buf, SW * SH * sizeof(u16));
+        DC_FlushRange(sbuf, SW * SH * sizeof(u16));
+        dmaCopy(buf, fb, SW * SH * sizeof(u16));
+        dmaCopy(sbuf, sfb, SW * SH * sizeof(u16));
+    }
+
+    return 0;
+}
