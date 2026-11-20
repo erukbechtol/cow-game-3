@@ -11,7 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-            - name: Convert PNG assets to C bitmaps
+      - name: Convert PNG assets to C bitmaps
         run: |
           python3 -c "import PIL" 2>/dev/null || pip install --break-system-packages pillow
           python3 - <<'EOF'
@@ -41,7 +41,7 @@ jobs:
                           vals.append(f"0x{rgb15:04X}")
 
               with open(f"source/gfx/{name}.h", "w") as hf:
-                  hf.write(f"#pragma once\n")
+                  hf.write("#pragma once\n")
                   hf.write(f"#define {name.upper()}_BITMAP_WIDTH {w}\n")
                   hf.write(f"#define {name.upper()}_BITMAP_HEIGHT {h}\n")
                   hf.write(f"extern const unsigned short {name}Bitmap[{w * h}];\n")
@@ -55,7 +55,6 @@ jobs:
 
               print(f"Converted {path} -> source/gfx/{name}.h/.c ({w}x{h})")
           EOF
-          
 
       - name: Build NDS ROM
         run: |
@@ -69,3 +68,4 @@ jobs:
         with:
           name: cowgame3-ds
           path: cowgame3.nds
+          
