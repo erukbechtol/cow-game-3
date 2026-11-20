@@ -8,7 +8,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install libnds and examples
         run: dkp-pacman -S --noconfirm --needed nds-dev nds-examples
-      - name: Build using an official template Makefile
+      - name: Build game and test ROM
         run: |
           ls $DEVKITPRO/examples/nds/templates
           T=""
@@ -20,9 +20,25 @@ jobs:
           mkdir -p work && cp -r "$(dirname "$T")"/. work/
           mkdir -p work/source && rm -rf work/source/* && cp source/main.c work/source/
           make -C work
-          find work -name '*.nds'
+          echo "--- files after game build ---"
+          find work -type f | head -40
           cp "$(find work -name '*.nds' | head -n1)" cowgame3.nds
+          rm -rf work/source/*
+          cat > work/source/main.c <<'EOF'
+          #include <nds.h>
+          #include <stdio.h>
+          int main(void) {
+              consoleDemoInit();
+              iprintf("HELLO COW\nTEST OK\n");
+              while (1) swiWaitForVBlank();
+          }
+          EOF
+          make -C work clean
+          make -C work
+          cp "$(find work -name '*.nds' | head -n1)" hello.nds
       - uses: actions/upload-artifact@v4
         with:
           name: cowgame3-ds
-          path: cowgame3.nds
+          path: |
+            cowgame3.nds
+            hello.nds
