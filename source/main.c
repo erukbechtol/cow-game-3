@@ -1,6 +1,7 @@
 // COW GAME 3 - Nintendo DS/DSi homebrew platformer (BlocksDS / libnds)
-// D-Pad: move | A: jump | B / Y / touch LICK: lick | L / R / touch SPIT: spit (recharging)
-// X / touch HARD: toggle Hard Mode | SELECT / touch RADIO: toggle radio | START / touch PAUSE: pause
+// D-Pad: move | L: sprint | A: jump (or return to title when paused)
+// B / Y / touch LICK: lick | R / touch SPIT: spit (recharging)
+// X: toggle Hard Mode | SELECT / touch RADIO: toggle radio | START / touch PAUSE: pause
 #include <nds.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -162,7 +163,6 @@ static float grad1d(int ix, u32 seed) {
     u32 h = (u32)ix * 374761393u ^ (seed * 668265263u + 0x9E3779B9u);
     h = (h ^ (h >> 13)) * 1274126177u;
     h ^= (h >> 16);
-    // Map to [-1.0, 1.0]
     return ((float)(h & 0xFFFFu) / 32767.5f) - 1.0f;
 }
 
@@ -188,7 +188,7 @@ static float fbm1d(float x, u32 seed) {
         amp *= 0.45f;
         freq *= 2.05f;
     }
-    return sum / norm; // Roughly [-1.0, 1.0]
+    return sum / norm;
 }
 
 // ---- Bit-crushed Portal-radio chiptune generator ----
@@ -336,9 +336,7 @@ static void buildLevel(int targetLevel, u32 seed) {
         float n = fbm1d((float)c * 0.11f, seed);
         int isGap = 0;
 
-        // Safe start zone (cols 0..5) and goal platform zone (cols 58..63)
         if (c >= 6 && c <= 57) {
-            // Carve occasional jumpable pits without making 2+ consecutive gap columns too wide
             if (n < -0.34f && gapRun < 2) {
                 isGap = 1;
                 gapRun++;
@@ -352,7 +350,6 @@ static void buildLevel(int targetLevel, u32 seed) {
         if (isGap) {
             groundRow[c] = MH;
         } else {
-            // Map Perlin height to rows 8..10
             int h = 9 + (int)roundf(-n * 1.6f);
             if (h < 8) h = 8;
             if (h > 10) h = 10;
@@ -365,7 +362,6 @@ static void buildLevel(int targetLevel, u32 seed) {
         }
     }
 
-    // Generate platforms, coins, and enemies using seeded Perlin noise
     ne = 0;
     int lastEnemyCol = 4;
 
@@ -373,9 +369,8 @@ static void buildLevel(int targetLevel, u32 seed) {
         float pNoise = perlin1d((float)c * 0.19f + 13.7f, seed ^ 0xA5A5A5A5u);
         float cNoise = perlin1d((float)c * 0.27f + 5.1f, seed ^ 0x3C3C3C3Cu);
 
-        // Floating platform span
         if (pNoise > 0.26f && c + 3 <= 56) {
-            int platRow = 5 + (c % 3); // rows 5..7
+            int platRow = 5 + (c % 3);
             int platLen = 3 + ((c + targetLevel) & 1);
             int canPlace = 1;
             for (int l = 0; l < platLen; l++) {
@@ -393,12 +388,10 @@ static void buildLevel(int targetLevel, u32 seed) {
             }
         }
 
-        // Ground coin
         if (groundRow[c] < MH && cNoise > 0.18f && map[groundRow[c] - 1][c] == 0) {
             map[groundRow[c] - 1][c] = 'o';
         }
 
-        // Lemon enemy on solid ground with spacing and 2s spawn grace period
         if (ne < NE && c >= lastEnemyCol + 6 && c <= 54 && groundRow[c] < MH &&
             groundRow[c + 1] < MH && map[groundRow[c] - 1][c] == 0) {
             en[ne].x = c * TS;
@@ -540,8 +533,16 @@ static void updatePlay(int held, int down, int touched, int tx, int ty) {
     }
     if ((touched && tx >= 10 && tx < 74 && ty >= 150 && ty < 182) || (down & KEY_START)) {
         paused = !paused;
+        return;
     }
-    if (paused) return;
+    if (paused) {
+        if (down & KEY_A) {
+            paused = 0;
+            clearSpits();
+            state = 0;
+        }
+        return;
+    }
 
     if (spitCharge < SPIT_MAX_CHARGE) {
         spitCharge++;
@@ -550,10 +551,12 @@ static void updatePlay(int held, int down, int touched, int tx, int ty) {
         spitCooldown--;
     }
 
-    // Sped-up walking & jumping
+    // L button sprints; walk & jump speeds are brisk
+    int sprinting = (held & KEY_L) ? 1 : 0;
+    int moveSpeed = sprinting ? 54 : 38;
     int want = 0;
-    if (held & KEY_LEFT)  { want = -38; face = -1; }
-    if (held & KEY_RIGHT) { want = 38;  face = 1; }
+    if (held & KEY_LEFT)  { want = -moveSpeed; face = -1; }
+    if (held & KEY_RIGHT) { want =  moveSpeed; face =  1; }
     vx16 = want;
 
     int nx = x16 + vx16;
@@ -583,7 +586,7 @@ static void updatePlay(int held, int down, int touched, int tx, int ty) {
     }
 
     if (jumpBufferTimer > 0 && coyoteTimer > 0) {
-        vy16 = -130;
+        vy16 = sprinting ? -136 : -130;
         ground = 0;
         coyoteTimer = 0;
         jumpBufferTimer = 0;
@@ -603,7 +606,12 @@ static void updatePlay(int held, int down, int touched, int tx, int ty) {
     }
     if (lick > 0) lick--;
 
-    if ((down & (KEY_L | KEY_R)) || (touched && tx >= 132 && tx < 244 && ty >= 96 && ty < 128)) {
+    if ((down & (KEY_R | KEY_Y)) || (touched && tx >= 132 && tx < 244 && ty >= 96 && ty < 128)) {
+        if (down & KEY_R) {
+            tryFireSpit(px, py);
+        }
+    }
+    if (touched && tx >= 132 && tx < 244 && ty >= 96 && ty < 128) {
         tryFireSpit(px, py);
     }
 
@@ -638,7 +646,6 @@ static void updatePlay(int held, int down, int touched, int tx, int ty) {
         }
     }
 
-    // Player spit projectiles
     for (int s = 0; s < MAX_SPITS; s++) {
         if (!spits[s].active) continue;
         spits[s].x += spits[s].vx;
@@ -656,7 +663,6 @@ static void updatePlay(int held, int down, int touched, int tx, int ty) {
         }
     }
 
-    // Enemy projectiles (Hard Mode)
     for (int s = 0; s < MAX_ENEMY_SPITS; s++) {
         if (!enemySpits[s].active) continue;
         if (!hardMode) {
@@ -683,20 +689,11 @@ static void updatePlay(int held, int down, int touched, int tx, int ty) {
         if (!e->alive) continue;
         e->anim++;
 
-        if (e->graceTimer > 0) {
-            e->graceTimer--;
-        }
-        if (e->lickTimer > 0) {
-            e->lickTimer--;
-        }
-        if (e->lickCooldown > 0) {
-            e->lickCooldown--;
-        }
-        if (e->spitCooldown > 0) {
-            e->spitCooldown--;
-        }
+        if (e->graceTimer > 0) e->graceTimer--;
+        if (e->lickTimer > 0) e->lickTimer--;
+        if (e->lickCooldown > 0) e->lickCooldown--;
+        if (e->spitCooldown > 0) e->spitCooldown--;
 
-        // Faster movement in Hard Mode
         for (int step = 0; step < enemySpeed; step++) {
             int nex = e->x + e->dir;
             int ahead = e->dir > 0 ? nex + 24 : nex;
@@ -708,7 +705,6 @@ static void updatePlay(int held, int down, int touched, int tx, int ty) {
             }
         }
 
-        // Hard Mode enemy lick & spit attacks (respecting grace period & regen timers)
         if (hardMode && e->graceTimer == 0) {
             int dx = px - e->x;
             int dy = abs((py + PH / 2) - (e->y + 10));
@@ -727,14 +723,12 @@ static void updatePlay(int held, int down, int touched, int tx, int ty) {
             }
         }
 
-        // Player lick hits enemy
         if (lick > 0 && overlap(tonx, py + 10, 28, 8, e->x, e->y, 24, 20)) {
             e->alive = 0;
             score += hardMode ? 150 : 100;
             continue;
         }
 
-        // Enemy lick hitbox hurts player
         if (hardMode && e->graceTimer == 0 && e->lickTimer > 0) {
             int elx = (e->dir > 0) ? (e->x + 24) : (e->x - 24);
             if (overlap(elx, e->y + 9, 24, 6, px, py, PW, PH)) {
@@ -742,7 +736,6 @@ static void updatePlay(int held, int down, int touched, int tx, int ty) {
             }
         }
 
-        // Direct enemy contact (no damage while enemy is in 2s spawn grace period)
         if (overlap(px, py, PW, PH, e->x, e->y, 24, 20)) {
             if (vy16 > 0 && (py + PH) - e->y < 15) {
                 e->alive = 0;
@@ -767,6 +760,8 @@ static void updatePlay(int held, int down, int touched, int tx, int ty) {
 }
 
 // ---- Regenerating bar inside 112x32 SPIT button sprite ----
+// 8px narrower than previous (bw - 28), 1px thinner (barH = 3), 3px lower (by + bh - 9),
+// and uses rounded/clean fill without a single-pixel stray green strand.
 static void drawSpitBarFill(u16 *dst, int bx, int by, int charge, int maxCharge) {
     const int bw = 112;
     const int bh = 32;
@@ -775,31 +770,27 @@ static void drawSpitBarFill(u16 *dst, int bx, int by, int charge, int maxCharge)
     if (charge < 0) charge = 0;
     if (charge > maxCharge) charge = maxCharge;
 
-    const int barX = bx + 10;
-    const int barW = bw - 20;
-    const int barY = by + bh - 12;
-    const int barH = 4;
+    const int barX = bx + 14;
+    const int barW = bw - 28;
+    const int barY = by + bh - 9;
+    const int barH = 3;
 
     int fillW = (charge * barW) / maxCharge;
     if (fillW <= 0) return;
+    if (fillW > barW) fillW = barW;
 
     int full = (charge >= maxCharge);
 
     for (int j = 0; j < barH; j++) {
         for (int i = 0; i < fillW; i++) {
-            float t = (float)i / (float)barW;
             u16 col;
-
             if (j == 0) {
-                col = full ? C(20, 31, 18) : C(31, 30, 16);
-            } else if (t < 0.45f) {
-                col = C(29, 7, 5);
-            } else if (t < 0.80f) {
-                col = C(31, 18, 3);
+                col = full ? C(16, 28, 12) : C(31, 28, 10);
+            } else if (j == 1) {
+                col = full ? C(8, 24, 8) : C(31, 18, 3);
             } else {
-                col = full ? C(8, 26, 9) : C(31, 29, 4);
+                col = full ? C(5, 18, 5) : C(27, 8, 4);
             }
-
             px_set(dst, barX + i, barY + j, col);
         }
     }
@@ -890,12 +881,10 @@ static void drawPlay(void) {
         }
     }
 
-    // Goal flag
     rect(buf, 62 * TS + 6 - camx, 80, 3, 80, WHT);
     rect(buf, 62 * TS + 9 - camx, 80, 22, 14, LICKC);
     rect(buf, 62 * TS + 9 - camx, 80, 22, 3, PINK);
 
-    // Lemon enemies (32x32 sprite) + grace blink + Hard Mode lick tongue
     for (int i = 0; i < ne; i++) {
         if (!en[i].alive) continue;
         if (en[i].graceTimer > 0 && ((en[i].graceTimer / 4) % 2) == 1) continue;
@@ -910,7 +899,6 @@ static void drawPlay(void) {
         }
     }
 
-    // Player spit projectiles
     for (int s = 0; s < MAX_SPITS; s++) {
         if (!spits[s].active) continue;
         int sx = spits[s].x - camx;
@@ -919,7 +907,6 @@ static void drawPlay(void) {
         rect(buf, sx + 1, sy + 1, 6, 4, YEL);
     }
 
-    // Hard Mode enemy spit projectiles
     for (int s = 0; s < MAX_ENEMY_SPITS; s++) {
         if (!enemySpits[s].active) continue;
         int sx = enemySpits[s].x - camx;
@@ -928,14 +915,12 @@ static void drawPlay(void) {
         rect(buf, sx + 1, sy + 1, 6, 4, YEL);
     }
 
-    // Cow player (48x40 sprite, aligned to collision box)
     if (inv == 0 || (inv % 6) < 3) {
         int drawX = px - camx - ((48 - PW) / 2);
         int drawY = py - (40 - PH);
         drawBmp16(buf, (const u16 *)cowBitmap, 48, 40, drawX, drawY, face < 0);
     }
 
-    // Player lick tongue
     if (lick > 0) {
         int lx = (face > 0 ? px + PW : px - 28) - camx;
         int ly = py + 11;
@@ -943,7 +928,6 @@ static void drawPlay(void) {
         rect(buf, lx, ly, 28, 2, PINK);
     }
 
-    // Top HUD
     char s[48];
     snprintf(s, sizeof s, "L%d %06d %s", levelNum, score, hardMode ? "HARD" : "NORM");
     text(buf, s, 7, 5, 2, BLK);
@@ -956,8 +940,9 @@ static void drawPlay(void) {
     }
 
     if (paused) {
-        rect(buf, 54, 72, 148, 38, BLK);
-        text(buf, "PAUSED", 64, 80, 4, WHT);
+        rect(buf, 36, 66, 184, 56, BLK);
+        text(buf, "PAUSED", 76, 74, 3, WHT);
+        text(buf, "A:TITLE  START:RESUME", 46, 104, 1, YEL);
     }
 }
 
@@ -995,7 +980,6 @@ static void drawSub(void) {
         rect(sbuf, 8 + i * 14, 20, 10, 7, LICKC);
     }
 
-    // Minimap
     rect(sbuf, 30, 32, 196, 38, BLK);
     rect(sbuf, 32, 34, 192, 34, SKY_TOP);
     for (int r = 0; r < MH; r++) {
@@ -1018,16 +1002,14 @@ static void drawSub(void) {
     rect(sbuf, 32 + camx * 3 / TS, 32, SW * 3 / TS, 1, WHT);
     rect(sbuf, 32 + camx * 3 / TS, 69, SW * 3 / TS, 1, WHT);
 
-    text(sbuf, "A JUMP B LICK L/R SPIT", 14, 78, 1, WHT);
+    text(sbuf, "A JUMP L RUN B LICK R SPIT", 8, 78, 1, WHT);
     text(sbuf, hardMode ? "X HARD:ON SEL RADIO" : "X HARD:OFF SEL RADIO", 24, 88, 1, hardMode ? HARD_RED : YEL);
 
-    // 112x32 SPIT button + regenerating fill inside its inner bar slot
     int spitX = 132;
     int spitY = 96;
     drawBmp16(sbuf, (const u16 *)btn_spitBitmap, 112, 32, spitX, spitY, 0);
     drawSpitBarFill(sbuf, spitX, spitY, spitCharge, SPIT_MAX_CHARGE);
 
-    // Bottom button sprites
     drawBmp16(sbuf, (const u16 *)btn_pauseBitmap, 64, 32, 10, 150, 0);
     drawBmp16(sbuf, (const u16 *)btn_lickBitmap,  96, 40, 78, 144, 0);
     drawBmp16(sbuf, (const u16 *)btn_radioBitmap, 64, 32, 178, 150, 0);
