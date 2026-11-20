@@ -1,5 +1,6 @@
 // COW GAME 3 - Nintendo DS/DSi homebrew platformer (BlocksDS / libnds)
-// D-Pad: move | A: jump | B / Y / touch LICK: lick attack | SELECT / touch RADIO: toggle radio | START / touch PAUSE: pause
+// D-Pad: move | A: jump | B / Y / touch LICK: lick | L / R / touch SPIT: spit (recharging)
+// SELECT / touch RADIO: toggle radio | START / touch PAUSE: pause
 #include <nds.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -14,9 +15,13 @@
 #define PW 18
 #define PH 28
 #define NE 8
+#define MAX_SPITS 4
 
+#define BOOT_FRAMES 120          // ~2 seconds at 60 FPS
 #define COYOTE_FRAMES 6
 #define JUMP_BUFFER_FRAMES 6
+#define SPIT_MAX_CHARGE 180      // ~3 seconds full recharge at 60 FPS
+#define SPIT_COOLDOWN_FRAMES 12
 
 // Audio synthesis settings (8-bit signed PCM loop, ~11025 Hz, 4.0s loop)
 #define AUDIO_RATE 11025
@@ -29,15 +34,20 @@
 #define SKY_TOP   C(8, 16, 30)
 #define SKY_BOT   C(18, 25, 31)
 #define CLOUD_HI  C(31, 31, 31)
-#define CLOUD_SH  C(23, 26, 31)
+#define CLOUD_MD  C(27, 29, 31)
+#define CLOUD_SH  C(21, 24, 30)
 #define WHT       C(31, 31, 31)
 #define BLK       C(2, 2, 3)
 #define YEL       C(31, 29, 3)
-#define DYEL      C(24, 20, 2)
-#define LEMON_FL  C(31, 31, 18)
-#define GRN       C(5, 20, 5)
-#define HORN      C(20, 17, 12)
-#define PINK      C(30, 18, 18)
+#define DYEL      C(23, 18, 2)
+#define LEMON_FL  C(31, 31, 19)
+#define GRN       C(6, 22, 6)
+#define LGRN      C(13, 27, 10)
+#define DGRN      C(3, 13, 4)
+#define HORN      C(21, 18, 13)
+#define DHORN     C(14, 11, 8)
+#define PINK      C(31, 19, 20)
+#define DPINK     C(25, 11, 13)
 #define UDD       C(31, 22, 22)
 #define DIRT_HI   C(19, 12, 6)
 #define DIRT_MD   C(16, 10, 5)
@@ -52,46 +62,75 @@
 #define BTN       C(8, 15, 29)
 #define BTN_ON    C(7, 22, 13)
 #define BTN_OFF   C(16, 10, 12)
+#define SPIT_BTN  C(31, 18, 4)
 #define LICKC     C(30, 12, 13)
 #define TONGUE    C(31, 10, 12)
 
-static u16 *buf  = NULL; // top screen back buffer (256x192)
-static u16 *sbuf = NULL; // bottom screen back buffer (256x192)
+static u16 *buf  = NULL;
+static u16 *sbuf = NULL;
 static s8  *radioPcm = NULL;
 static int  radioChannel = -1;
 static int  radioMuted = 0;
 static int  dsiMode = 0;
 
-static const char *COW[16] = {
-    "..GG.......H....",
-    ".GGG.YYYYYYYH...",
-    ".GGYYYYYYYYYY...",
-    "..HYYYYYYEYYYY..",
-    "..YYYYYYYYYYYPP.",
-    ".YYYYYYYYYYYPPP.",
-    ".YYYYYYYYYYYPpP.",
-    ".YYYYYYYYYYYYPP.",
-    "..YYYYYYYYYYYP..",
-    "..YYYYYYYYYYY...",
-    "...YYYYYYYYY....",
-    "....UU...UU.....",
-    "...W.W...W.W....",
-    "...W.W...W.W....",
-    "...W.W...W.W....",
-    "...K.K...K.K...."
+// Detailed 24x20 Lemon-Cow sprite (facing right by default)
+static const char *COW_SPRITE[20] = {
+    ".......LL..HH......HH...",
+    "......LLL.H..H....H..H..",
+    ".....LLLL.HH..H..H..HH..",
+    "....LLGLL..HHHH..HHHH...",
+    ".....LG..YYYYYYYYYYYY...",
+    "........YYYYYYYYYYYYYY..",
+    ".......YYLYYYYYYYYYYYY..",
+    "......YYYYYYYYYYYYYPPP..",
+    "......YYYYYYYYYYYYPPPPPP",
+    "......YYDYYYYYYYYYPPKPPP",
+    ".......YYYYYYYYYYYPPPPPP",
+    ".......YYYYYYYYYYYYYDPPP",
+    "........YYYYYYYYYYYYY...",
+    ".........YYYYYYYYYY.....",
+    ".........YYYYYYYYYY.....",
+    "..........UU....UU......",
+    ".........WW.W..WW.W.....",
+    ".........WW.W..WW.W.....",
+    ".........WW.W..WW.W.....",
+    ".........KK.K..KK.K....."
 };
 
-static const char *LEMON[10] = {
-    ".....GG.....",
-    "...YYYYYY...",
-    "..YYYYYYYY..",
-    ".YYEYYYYEYYY",
-    ".YYYYYYYYYY.",
-    ".YYYEEEEYYY.",
-    ".YYYYYYYYYY.",
-    "..YYYYYYYY..",
-    "...YYYYYY...",
-    ".....yy....."
+// Detailed 16x14 Grumpy Lemon enemy sprite
+static const char *LEMON_SPRITE[14] = {
+    ".......LL.......",
+    "......LGGL......",
+    ".......GD.......",
+    "....YYYYYYYY....",
+    "..YYLYYYYYYYYY..",
+    ".YYYYYYYYYYYYYY.",
+    ".YYKKYYYYYYKKYY.",
+    ".YYYYKYYYYKYYYY.",
+    ".YYYYYYYYYYYYYY.",
+    ".YYDYYYYYYYYDYY.",
+    "..YYYYDYYYDYYY..",
+    "...YYYYDDDDYY...",
+    "....YYYYYYYY....",
+    "......DDDD......"
+};
+
+// Detailed 32x14 Puffy Cloud sprite
+static const char *CLOUD_SPRITE[14] = {
+    ".........CCCCCCCCC..............",
+    ".......CCCHHHHHHHHCC............",
+    "......CHHHHHHHHHHHHHCC..........",
+    "....CCCHHHHHHHHHHHHHHHCC........",
+    "...CHHHHHHHHHHHHHHHHHHHCCC......",
+    "..CHHHHHHHHHHHHHHHHHHHHHHHCC....",
+    ".CHHHHHHHHHHHHHHHHHHHHHHHHHHCC..",
+    ".CHHHHHHHHHHHHHHHHHHHHHHHHHHHHC.",
+    ".CHHHHHHHHHHHHHHHHHHHHHHHHHHHHC.",
+    ".CMMMMMMMMMMMMMMMMMMMMMMMMMMMMC.",
+    "..CCCCCCCCCCCCCCCCCCCCCCCCCCCC..",
+    "...SSSSSSSMMMMMMMMMMMMMMSSSSSS..",
+    ".....SSSSSSSSSSSSSSSSSSSSSSSS...",
+    ".........SSSSSSSSSSSSSSSS......."
 };
 
 // ---- tiny 3x5 font (each row is an octal digit = 3 pixels) ----
@@ -137,26 +176,36 @@ static void rect(u16 *b, int x, int y, int w, int h, u16 c) {
 
 static u16 pal(char ch) {
     switch (ch) {
-        case 'Y': return YEL;   case 'y': return DYEL;  case 'G': return GRN;
-        case 'H': return HORN;  case 'P': return PINK;  case 'p': return LICKC;
-        case 'W': return WHT;   case 'K': return BLK;   case 'E': return BLK;
-        case 'U': return UDD;   default: return 0;
+        case 'Y': return YEL;
+        case 'D': return DYEL;
+        case 'L': return LEMON_FL;
+        case 'G': return GRN;
+        case 'l': return LGRN;
+        case 'd': return DGRN;
+        case 'H': return HORN;
+        case 'h': return DHORN;
+        case 'P': return PINK;
+        case 'p': return DPINK;
+        case 'W': return WHT;
+        case 'K': return BLK;
+        case 'U': return UDD;
+        case 'C': return CLOUD_HI;
+        case 'M': return CLOUD_MD;
+        case 'S': return CLOUD_SH;
+        default:  return 0; // transparent
     }
 }
 
-static void sprite(u16 *b, const char **s, int w, int h, int x, int y, int sc, int flip) {
+static void drawSpriteGrid(u16 *b, const char **s, int w, int h, int x, int y, int sc, int flip) {
     for (int j = 0; j < h; j++) {
         for (int i = 0; i < w; i++) {
-            char ch = s[j][flip ? w - 1 - i : i];
-            if (ch == '.') continue;
+            char ch = s[j][flip ? (w - 1 - i) : i];
             u16 col = pal(ch);
-            for (int sy = 0; sy < sc; sy++) {
-                for (int sx = 0; sx < sc; sx++) {
-                    u16 out = col;
-                    if (ch == 'Y' && j < 4 && sy == 0) out = LEMON_FL;
-                    else if (ch == 'Y' && j > 10 && sy == sc - 1) out = DYEL;
-                    px_set(b, x + i * sc + sx, y + j * sc + sy, out);
-                }
+            if (!col) continue;
+            if (sc == 1) {
+                px_set(b, x + i, y + j, col);
+            } else {
+                rect(b, x + i * sc, y + j * sc, sc, sc, col);
             }
         }
     }
@@ -273,14 +322,25 @@ static void toggleRadio(void) {
     }
 }
 
-// ---- game state ----
+// ---- Game state ----
 typedef struct { int x, y, dir, alive, anim; } Enemy;
+typedef struct { int x, y, vx, active; } SpitProj;
+
 static u8 map[MH][MW];
 static Enemy en[NE];
+static SpitProj spits[MAX_SPITS];
 static int ne;
 static int x16, y16, vx16, vy16, face, ground, inv, lick;
+static int spitCharge, spitCooldown;
 static int coyoteTimer, jumpBufferTimer;
-static int score, health, state, paused, frame;
+static int score, health, state, paused, frame, bootTimer;
+// state: -1 boot splash (2s), 0 title, 1 playing, 3 win, 4 game over
+
+static void clearSpits(void) {
+    for (int i = 0; i < MAX_SPITS; i++) {
+        spits[i].active = 0;
+    }
+}
 
 static void buildLevel(void) {
     memset(map, 0, sizeof map);
@@ -314,6 +374,7 @@ static void buildLevel(void) {
         en[ne].anim = i * 7;
         ne++;
     }
+    clearSpits();
 }
 
 static void resetPlayer(void) {
@@ -327,6 +388,9 @@ static void resetPlayer(void) {
     jumpBufferTimer = 0;
     inv = 60;
     lick = 0;
+    spitCharge = SPIT_MAX_CHARGE;
+    spitCooldown = 0;
+    clearSpits();
 }
 
 static void newGame(void) {
@@ -373,18 +437,42 @@ static void hurt(void) {
     if (health <= 0) state = 4;
 }
 
+static void tryFireSpit(int px, int py) {
+    if (spitCooldown > 0 || spitCharge < SPIT_MAX_CHARGE) return;
+    for (int i = 0; i < MAX_SPITS; i++) {
+        if (!spits[i].active) {
+            spits[i].active = 1;
+            spits[i].x = (face > 0) ? (px + PW + 2) : (px - 10);
+            spits[i].y = py + 11;
+            spits[i].vx = (face > 0) ? 5 : -5;
+            spitCharge = 0;
+            spitCooldown = SPIT_COOLDOWN_FRAMES;
+            break;
+        }
+    }
+}
+
 static void updatePlay(int held, int down, int touched, int tx, int ty) {
     if (down & KEY_SELECT) {
         toggleRadio();
     }
-    if (touched && tx >= 182 && tx < 246 && ty >= 150 && ty < 176) {
+    if (touched && tx >= 182 && tx < 246 && ty >= 152 && ty < 180) {
         toggleRadio();
     }
-    if ((touched && tx >= 10 && tx < 70 && ty >= 150 && ty < 176) || (down & KEY_START)) {
+    if ((touched && tx >= 10 && tx < 70 && ty >= 152 && ty < 180) || (down & KEY_START)) {
         paused = !paused;
     }
     if (paused) return;
 
+    // Recharge spit meter over time
+    if (spitCharge < SPIT_MAX_CHARGE) {
+        spitCharge++;
+    }
+    if (spitCooldown > 0) {
+        spitCooldown--;
+    }
+
+    // Horizontal movement
     int want = 0;
     if (held & KEY_LEFT)  { want = -28; face = -1; }
     if (held & KEY_RIGHT) { want = 28;  face = 1; }
@@ -404,6 +492,7 @@ static void updatePlay(int held, int down, int touched, int tx, int ty) {
         vx16 = 0;
     }
 
+    // Jump buffering & coyote time
     if (down & KEY_A) {
         jumpBufferTimer = JUMP_BUFFER_FRAMES;
     } else if (jumpBufferTimer > 0) {
@@ -430,11 +519,20 @@ static void updatePlay(int held, int down, int touched, int tx, int ty) {
     vy16 += 5;
     if (vy16 > 140) vy16 = 140;
 
-    if (lick == 0 && ((down & (KEY_B | KEY_Y)) || (touched && tx >= 76 && tx < 176 && ty >= 140 && ty < 184))) {
+    int px = x16 >> 4, py = y16 >> 4;
+
+    // Lick attack (always available, zero cooldown)
+    if (lick == 0 && ((down & (KEY_B | KEY_Y)) || (touched && tx >= 76 && tx < 176 && ty >= 146 && ty < 184))) {
         lick = 14;
     }
     if (lick > 0) lick--;
 
+    // Spit attack via L or R triggers, or bottom-screen SPIT button
+    if ((down & (KEY_L | KEY_R)) || (touched && tx >= 132 && tx < 246 && ty >= 104 && ty < 138)) {
+        tryFireSpit(px, py);
+    }
+
+    // Vertical movement & collision
     int ny = y16 + vy16;
     ground = 0;
     if (!boxhit(x16 >> 4, ny >> 4, PW, PH)) {
@@ -454,8 +552,10 @@ static void updatePlay(int held, int down, int touched, int tx, int ty) {
 
     if (inv > 0) inv--;
 
-    int px = x16 >> 4, py = y16 >> 4;
+    px = x16 >> 4;
+    py = y16 >> 4;
 
+    // Collect lemon slices
     for (int r = (py < 0 ? 0 : py / TS); r <= (py + PH - 1) / TS && r < MH; r++) {
         for (int c = px / TS; c <= (px + PW - 1) / TS && c < MW; c++) {
             if (map[r][c] == 'o') {
@@ -465,6 +565,25 @@ static void updatePlay(int held, int down, int touched, int tx, int ty) {
         }
     }
 
+    // Update spit projectiles
+    for (int s = 0; s < MAX_SPITS; s++) {
+        if (!spits[s].active) continue;
+        spits[s].x += spits[s].vx;
+        if (spits[s].x < 0 || spits[s].x > MW * TS || boxhit(spits[s].x, spits[s].y, 8, 6)) {
+            spits[s].active = 0;
+            continue;
+        }
+        for (int i = 0; i < ne; i++) {
+            if (en[i].alive && overlap(spits[s].x, spits[s].y, 8, 6, en[i].x, en[i].y, 24, 20)) {
+                en[i].alive = 0;
+                spits[s].active = 0;
+                score += 100;
+                break;
+            }
+        }
+    }
+
+    // Update enemies + lick / stomp / body collisions
     int tonx = face > 0 ? px + PW : px - 28;
     for (int i = 0; i < ne; i++) {
         Enemy *e = &en[i];
@@ -505,6 +624,7 @@ static void updatePlay(int held, int down, int touched, int tx, int ty) {
     if (px >= 61 * TS) state = 3;
 }
 
+// ---- Environment & Sprite Rendering ----
 static void drawSkyAndClouds(int camx) {
     for (int y = 0; y < SH; y++) {
         u16 skyCol = (y < 96) ? SKY_TOP : SKY_BOT;
@@ -514,10 +634,9 @@ static void drawSkyAndClouds(int camx) {
     for (int i = 0; i < 5; i++) {
         int span = SW + 140;
         int cx = (((i * 180 - camx / 3) % span) + span) % span - 70;
-        int cy = 24 + (i * 37) % 52;
-        rect(buf, cx, cy, 52, 12, CLOUD_HI);
-        rect(buf, cx + 8, cy - 6, 32, 8, CLOUD_HI);
-        rect(buf, cx + 2, cy + 9, 48, 3, CLOUD_SH);
+        int cy = 18 + (i * 31) % 46;
+        int sc = (i % 2 == 0) ? 2 : 1;
+        drawSpriteGrid(buf, CLOUD_SPRITE, 32, 14, cx, cy, sc, (i % 3 == 0));
     }
 }
 
@@ -562,191 +681,4 @@ static void drawPlay(void) {
 
     int c0 = camx / TS;
     int c1 = c0 + SW / TS + 1;
-    if (c1 >= MW) c1 = MW - 1;
-
-    for (int r = 0; r < MH; r++) {
-        for (int c = c0; c <= c1; c++) {
-            u8 t = map[r][c];
-            if (!t) continue;
-            drawTileTextured(c * TS - camx, r * TS, r, c, t);
-        }
-    }
-
-    rect(buf, 62 * TS + 6 - camx, 80, 3, 80, WHT);
-    rect(buf, 62 * TS + 9 - camx, 80, 22, 14, LICKC);
-    rect(buf, 62 * TS + 9 - camx, 80, 22, 3, PINK);
-
-    for (int i = 0; i < ne; i++) {
-        if (!en[i].alive) continue;
-        int bob = ((en[i].anim / 6) % 2 == 0) ? 0 : -1;
-        sprite(buf, LEMON, 12, 10, en[i].x - camx, en[i].y + bob, 2, en[i].dir > 0);
-    }
-
-    if (inv == 0 || (inv % 6) < 3) {
-        int drawX = px - camx - ((32 - PW) / 2);
-        int drawY = py - (32 - PH);
-        sprite(buf, COW, 16, 16, drawX, drawY, 2, face < 0);
-    }
-
-    if (lick > 0) {
-        int lx = (face > 0 ? px + PW : px - 28) - camx;
-        int ly = py + 11;
-        rect(buf, lx, ly, 28, 6, TONGUE);
-        rect(buf, lx, ly, 28, 2, PINK);
-    }
-
-    char s[40];
-    snprintf(s, sizeof s, "SCORE:%06d  %s", score, dsiMode ? "DSI 133" : "DS 67");
-    text(buf, s, 7, 5, 2, BLK);
-    text(buf, s, 6, 4, 2, WHT);
-
-    rect(buf, 238, 18, 14, 70, BLK);
-    for (int i = 0; i < health; i++) {
-        u16 col = i < 3 ? C(28,5,4) : (i < 5 ? C(30,24,3) : C(6,24,6));
-        rect(buf, 240, 84 - i * 8 - 6, 10, 6, col);
-    }
-
-    if (paused) {
-        rect(buf, 54, 72, 148, 38, BLK);
-        text(buf, "PAUSED", 64, 80, 4, WHT);
-    }
-}
-
-static void drawTitle(void) {
-    rect(buf, 0, 0, SW, SH, SKY_TOP);
-    rect(buf, 0, 96, SW, SH - 96, SKY_BOT);
-    sprite(buf, COW, 16, 16, 96, 26, 4, 0);
-    text(buf, "COW GAME 3", 50, 112, 4, WHT);
-    text(buf, dsiMode ? "DSI MODE ACTIVE" : "NDS MODE", 66, 148, 2, YEL);
-
-    rect(sbuf, 0, 0, SW, SH, SUBBG);
-    text(sbuf, "PORTAL RADIO LOOP", 46, 44, 2, WHT);
-    if ((frame / 30) % 2 == 0) {
-        text(sbuf, "PRESS START", 80, 96, 2, WHT);
-    }
-}
-
-static void drawSub(void) {
-    int px = x16 >> 4, py = y16 >> 4;
-    int camx = px - 112;
-    if (camx < 0) camx = 0;
-    if (camx > MW * TS - SW) camx = MW * TS - SW;
-
-    rect(sbuf, 0, 0, SW, SH, SUBBG);
-    text(sbuf, "LEVEL 1-1", 92, 6, 2, WHT);
-
-    for (int i = 0; i < health; i++) {
-        rect(sbuf, 8 + i * 14, 24, 10, 8, LICKC);
-    }
-
-    rect(sbuf, 30, 42, 196, 40, BLK);
-    rect(sbuf, 32, 44, 192, 36, SKY_TOP);
-    for (int r = 0; r < MH; r++) {
-        for (int c = 0; c < MW; c++) {
-            u8 t = map[r][c];
-            if (t) {
-                u16 mc = (t == '#') ? DIRT_HI : ((t == '=') ? PLAT_HI : GOLD);
-                rect(sbuf, 32 + c * 3, 44 + r * 3, 3, 3, mc);
-            }
-        }
-    }
-    for (int i = 0; i < ne; i++) {
-        if (en[i].alive) {
-            rect(sbuf, 32 + en[i].x * 3 / TS, 44 + en[i].y * 3 / TS, 3, 3, LICKC);
-        }
-    }
-    if ((frame / 8) % 2 == 0) {
-        rect(sbuf, 32 + px * 3 / TS, 44 + py * 3 / TS, 3, 4, YEL);
-    }
-    rect(sbuf, 32 + camx * 3 / TS, 42, SW * 3 / TS, 1, WHT);
-    rect(sbuf, 32 + camx * 3 / TS, 81, SW * 3 / TS, 1, WHT);
-
-    text(sbuf, "DPAD MOVE A JUMP B LICK", 16, 98, 1, WHT);
-    text(sbuf, "SELECT OR TAP RADIO", 36, 112, 1, YEL);
-
-    rect(sbuf, 10, 150, 60, 26, BTN);
-    text(sbuf, "PAUSE", 18, 159, 2, WHT);
-
-    rect(sbuf, 76, 140, 98, 44, LICKC);
-    text(sbuf, "LICK", 95, 154, 3, WHT);
-
-    rect(sbuf, 182, 150, 64, 26, radioMuted ? BTN_OFF : BTN_ON);
-    text(sbuf, radioMuted ? "MUTE" : "RADIO", 190, 159, 2, WHT);
-}
-
-int main(void) {
-#ifdef ARM9
-    dsiMode = isDSiMode() ? 1 : 0;
-#endif
-    if (dsiMode) {
-        setCpuClock(true);
-    }
-
-        buf  = (u16 *)malloc(SW * SH * sizeof(u16));
-    sbuf = (u16 *)malloc(SW * SH * sizeof(u16));
-    if (!buf || !sbuf) {
-        while (1) swiWaitForVBlank();
-    }
-
-    videoSetMode(MODE_5_2D | DISPLAY_BG3_ACTIVE);
-    videoSetModeSub(MODE_5_2D | DISPLAY_BG3_ACTIVE);
-    vramSetBankA(VRAM_A_MAIN_BG);
-    vramSetBankC(VRAM_C_SUB_BG);
-
-    int bg  = bgInit(3, BgType_Bmp16, BgSize_B16_256x256, 0, 0);
-    int sbg = bgInitSub(3, BgType_Bmp16, BgSize_B16_256x256, 0, 0);
-    u16 *fb  = bgGetGfxPtr(bg);
-    u16 *sfb = bgGetGfxPtr(sbg);
-
-    irqEnable(IRQ_VBLANK);
-    soundEnable();
-
-    buildRadioLoop();
-    startRadioLoop();
-
-    for (int i = 0; i < SW * SH; i++) {
-        fb[i] = C(0, 0, 0);
-        sfb[i] = C(0, 0, 0);
-    }
-
-    buildLevel();
-    state = 0;
-
-    while (1) {
-        scanKeys();
-        int down = keysDown(), held = keysHeld();
-        int touched = 0, tx = 0, ty = 0;
-        touchPosition tp;
-        if (down & KEY_TOUCH) {
-            touchRead(&tp);
-            touched = 1;
-            tx = tp.px;
-            ty = tp.py;
-        }
-        frame++;
-
-        if (state == 0) {
-            if (down & KEY_SELECT) toggleRadio();
-            if (down & KEY_START) newGame();
-            else drawTitle();
-        } else {
-            if (state == 1) updatePlay(held, down, touched, tx, ty);
-            drawPlay();
-            drawSub();
-            if (state == 3) text(buf, "YOU WIN!", 48, 70, 5, WHT);
-            if (state == 4) text(buf, "GAME OVER", 40, 70, 5, WHT);
-            if (state >= 3) {
-                text(buf, "PRESS START", 85, 120, 2, WHT);
-                if (down & KEY_START) state = 0;
-            }
-        }
-
-        swiWaitForVBlank();
-        DC_FlushRange(buf, SW * SH * sizeof(u16));
-        DC_FlushRange(sbuf, SW * SH * sizeof(u16));
-        dmaCopy(buf, fb, SW * SH * sizeof(u16));
-        dmaCopy(sbuf, sfb, SW * SH * sizeof(u16));
-    }
-
-    return 0;
-}
+    if (c1 >= MW) 
