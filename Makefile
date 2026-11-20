@@ -1,13 +1,7 @@
-BLOCKSDS    ?= /opt/blocksds/core
-BLOCKSDSEXT ?= /opt/blocksds/external
-
-NAME       := cowgame3
-GAME_TITLE := BLOCKSDS    ?= /opt/blocksds/core
-BLOCKSDSEXT ?= /opt/blocksds/external
+BLOCKSDS    ?= /opt/wonderful/thirdparty/blocksds/core
+BLOCKSDSEXT ?= /opt/wonderful/thirdparty/blocksds/external
 
 NAME       := cowgame3
 GAME_TITLE := Cow Game 3
 
-include $(BLOCKSDS)/sys/default_makefiles/rom_arm9only/Makefile Game 3
-
-include $(BLOCKSDS)/sys/default_makefiles/rom_arm9only/Makefile
+include $(BLOCKSDS)/sys/default_makefiles/rom_arm9/Makefile
