@@ -13,6 +13,8 @@ jobs:
 
       - name: Convert PNG assets to C bitmaps
         run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev zlib1g-dev
           mkdir -p source/gfx /tmp/png2c_src
 
           cat <<'EOF' > /tmp/png2c_src/png2c.c
