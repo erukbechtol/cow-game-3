@@ -370,9 +370,6 @@ static void updatePlay(int held, int down, int touched, int tx, int ty) {
     if (down & KEY_SELECT) {
         toggleRadio();
     }
-    // Bottom-screen button hitboxes aligned to sprite layout
-    // btn_pause: (10, 150, 64, 32) | btn_lick: (78, 144, 96, 40)
-    // btn_radio: (178, 150, 64, 32) | btn_spit: (132, 96, 112, 32)
     if (touched && tx >= 178 && tx < 242 && ty >= 150 && ty < 182) {
         toggleRadio();
     }
@@ -684,8 +681,7 @@ static void drawPlay(void) {
 
     if (paused) {
         rect(buf, 54, 72, 148, 38, BLK);
-        text(buf, "PAUSED", 
-                text(buf, "PAUSED", 64, 80, 4, WHT);
+        text(buf, "PAUSED", 64, 80, 4, WHT);
     }
 }
 
