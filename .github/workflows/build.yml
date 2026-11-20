@@ -185,5 +185,216 @@ jobs:
                   return 1;
               }
 
-              int bpp = (color_type == 6) ? 4 : ((color_type == 2
-              
+              int bpp = (color_type == 6) ? 4 : ((color_type == 2) ? 3 : 1);
+              size_t stride = (size_t)w * (size_t)bpp;
+              size_t raw_cap = (size_t)h * (stride + 1) + 64;
+              uint8_t *raw = (uint8_t *)malloc(raw_cap);
+              uLongf raw_len = (uLongf)raw_cap;
+
+              while (1) {
+                  int zres = uncompress(raw, &raw_len, idat_buf, (uLong)idat_len);
+                  if (zres == Z_OK) break;
+                  if (zres == Z_BUF_ERROR) {
+                      raw_cap *= 2;
+                      uint8_t *bigger = (uint8_t *)realloc(raw, raw_cap);
+                      if (!bigger) {
+                          free(raw);
+                          free(plte_buf);
+                          free(trns_buf);
+                          free(idat_buf);
+                          free(file_buf);
+                          return 1;
+                      }
+                      raw = bigger;
+                      raw_len = (uLongf)raw_cap;
+                      continue;
+                  }
+                  fprintf(stderr, "%s: zlib uncompress failed (%d)\n", png_path, zres);
+                  free(raw);
+                  free(plte_buf);
+                  free(trns_buf);
+                  free(idat_buf);
+                  free(file_buf);
+                  return 1;
+              }
+
+              uint8_t *recon = (uint8_t *)calloc((size_t)h * stride + 1, 1);
+              if (!recon) {
+                  free(raw);
+                  free(plte_buf);
+                  free(trns_buf);
+                  free(idat_buf);
+                  free(file_buf);
+                  return 1;
+              }
+
+              size_t idx = 0;
+              for (uint32_t y = 0; y < h; y++) {
+                  if (idx >= raw_len) {
+                      fprintf(stderr, "%s: unexpected end of decompressed PNG data\n", png_path);
+                      free(recon);
+                      free(raw);
+                      free(plte_buf);
+                      free(trns_buf);
+                      free(idat_buf);
+                      free(file_buf);
+                      return 1;
+                  }
+                  uint8_t ftype = raw[idx++];
+                  size_t row_start = (size_t)y * stride;
+                  size_t prev_start = (y > 0) ? ((size_t)(y - 1) * stride) : 0;
+
+                  for (size_t x = 0; x < stride; x++) {
+                      if (idx >= raw_len) {
+                          free(recon);
+                          free(raw);
+                          free(plte_buf);
+                          free(trns_buf);
+                          free(idat_buf);
+                          free(file_buf);
+                          return 1;
+                      }
+                      int val = raw[idx++];
+                      int a = (x >= (size_t)bpp) ? recon[row_start + x - (size_t)bpp] : 0;
+                      int b = (y > 0) ? recon[prev_start + x] : 0;
+                      int c = (y > 0 && x >= (size_t)bpp) ? recon[prev_start + x - (size_t)bpp] : 0;
+                      int out = 0;
+
+                      if (ftype == 0) out = val;
+                      else if (ftype == 1) out = (val + a) & 0xFF;
+                      else if (ftype == 2) out = (val + b) & 0xFF;
+                      else if (ftype == 3) out = (val + ((a + b) >> 1)) & 0xFF;
+                      else if (ftype == 4) out = (val + paeth(a, b, c)) & 0xFF;
+                      else {
+                          fprintf(stderr, "%s: unsupported PNG filter %u\n", png_path, ftype);
+                          free(recon);
+                          free(raw);
+                          free(plte_buf);
+                          free(trns_buf);
+                          free(idat_buf);
+                          free(file_buf);
+                          return 1;
+                      }
+                      recon[row_start + x] = (uint8_t)out;
+                  }
+              }
+
+              char name[128];
+              char upper[128];
+              basename_no_ext(png_path, name, sizeof(name));
+              to_upper_str(name, upper, sizeof(upper));
+
+              char h_path[256];
+              char c_path[256];
+              snprintf(h_path, sizeof(h_path), "source/gfx/%s.h", name);
+              snprintf(c_path, sizeof(c_path), "source/gfx/%s.c", name);
+
+              FILE *hf = fopen(h_path, "w");
+              FILE *cf = fopen(c_path, "w");
+              if (!hf || !cf) {
+                  if (hf) fclose(hf);
+                  if (cf) fclose(cf);
+                  free(recon);
+                  free(raw);
+                  free(plte_buf);
+                  free(trns_buf);
+                  free(idat_buf);
+                  free(file_buf);
+                  return 1;
+              }
+
+              uint32_t total = w * h;
+              fprintf(hf, "#pragma once\n");
+              fprintf(hf, "#define %s_BITMAP_WIDTH %u\n", upper, w);
+              fprintf(hf, "#define %s_BITMAP_HEIGHT %u\n", upper, h);
+              fprintf(hf, "extern const unsigned short %sBitmap[%u];\n", name, total);
+
+              fprintf(cf, "#include \"%s.h\"\n\n", name);
+              fprintf(cf, "const unsigned short %sBitmap[%u] = {\n", name, total);
+
+              for (uint32_t i = 0; i < total; i++) {
+                  uint8_t r = 0, g = 0, b = 0, a = 255;
+
+                  if (color_type == 3) {
+                      size_t pidx = recon[i];
+                      if (pidx < plte_entries) {
+                          r = plte_buf[pidx * 3 + 0];
+                          g = plte_buf[pidx * 3 + 1];
+                          b = plte_buf[pidx * 3 + 2];
+                      }
+                      if (trns_buf && pidx < trns_len) {
+                          a = trns_buf[pidx];
+                      }
+                  } else {
+                      size_t p = (size_t)i * (size_t)bpp;
+                      r = recon[p];
+                      g = recon[p + 1];
+                      b = recon[p + 2];
+                      a = (bpp == 4) ? recon[p + 3] : 255;
+                  }
+
+                  uint16_t out_px = 0x0000;
+                  if (a >= 128) {
+                      uint16_t r5 = r >> 3;
+                      uint16_t g5 = g >> 3;
+                      uint16_t b5 = b >> 3;
+                      out_px = (uint16_t)(0x8000 | (b5 << 10) | (g5 << 5) | r5);
+                  }
+
+                  if ((i % 12) == 0) fprintf(cf, "    ");
+                  fprintf(cf, "0x%04X", out_px);
+                  if (i + 1 < total) fprintf(cf, ",");
+                  if ((i % 12) == 11 || i + 1 == total) fprintf(cf, "\n");
+                  else fprintf(cf, " ");
+              }
+
+              fprintf(cf, "};\n");
+              fclose(hf);
+              fclose(cf);
+
+              printf("Converted %s -> %s, %s (%ux%u)\n", png_path, h_path, c_path, w, h);
+
+              free(recon);
+              free(raw);
+              free(plte_buf);
+              free(trns_buf);
+              free(idat_buf);
+              free(file_buf);
+              return 0;
+          }
+
+          int main(int argc, char **argv) {
+              if (argc < 2) return 1;
+              for (int i = 1; i < argc; i++) {
+                  if (convert_one(argv[i]) != 0) return 1;
+              }
+              return 0;
+          }
+          EOF
+
+          cc -O2 /tmp/png2c_src/png2c.c -lz -o /tmp/png2c_src/png2c
+          /tmp/png2c_src/png2c graphics/*.png
+          ls -la source/gfx
+
+      - name: Build NDS ROM
+        run: |
+          export PATH="/opt/wonderful/bin:$PATH"
+          if [ -f /opt/wonderful/env.sh ]; then
+            . /opt/wonderful/env.sh
+          fi
+          echo "=== REPO FILES ==="
+          find . -maxdepth 3 -not -path '*/.*'
+          echo "=== MAKEFILE ==="
+          cat Makefile 2>/dev/null || true
+          echo "=== MAKE RUN ==="
+          make -r -d 2>&1 | tail -n 120 || true
+          echo "=== AFTER MAKE ==="
+          find . -maxdepth 4 -not -path '*/.*'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cowgame3-ds
+          path: |
+            *.nds
+            **/*.nds
+            
