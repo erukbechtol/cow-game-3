@@ -1,15 +1,13 @@
-ifeq ($(strip $(DEVKITPRO)),)
-$(error Please set DEVKITPRO (install devkitPro))
-endif
-ARM     := $(DEVKITPRO)/devkitARM/bin/arm-none-eabi-
-LIBNDS  := $(DEVKITPRO)/libnds
-NDSTOOL := $(DEVKITPRO)/tools/bin/ndstool
+BLOCKSDS    ?= /opt/blocksds/core
+BLOCKSDSEXT ?= /opt/blocksds/external
 
-cowgame3.nds: cowgame3.elf
-	$(NDSTOOL) -c $@ -9 $< -7 $(LIBNDS)/default.elf
+NAME       := cowgame3
+GAME_TITLE := BLOCKSDS    ?= /opt/blocksds/core
+BLOCKSDSEXT ?= /opt/blocksds/external
 
-cowgame3.elf: source/main.c
-	$(ARM)gcc -march=armv5te -mtune=arm946e-s -O2 -DARM9 -I$(LIBNDS)/include -specs=ds_arm9.specs $< -L$(LIBNDS)/lib -lnds9 -o $@
+NAME       := cowgame3
+GAME_TITLE := Cow Game 3
 
-clean:
-	rm -f cowgame3.elf cowgame3.nds
+include $(BLOCKSDS)/sys/default_makefiles/rom_arm9only/Makefile Game 3
+
+include $(BLOCKSDS)/sys/default_makefiles/rom_arm9only/Makefile
