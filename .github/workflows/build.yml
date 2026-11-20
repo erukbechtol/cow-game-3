@@ -264,5 +264,56 @@ jobs:
                       uint16_t r5 = r >> 3;
                       uint16_t g5 = g >> 3;
                       uint16_t b5 = b >> 3;
-                      out_px = (uint16_t)(0x8000 | (b
-                      
+                      out_px = (uint16_t)(0x8000 | (b5 << 10) | (g5 << 5) | r5);
+                  }
+
+                  if ((i % 12) == 0) fprintf(cf, "    ");
+                  fprintf(cf, "0x%04X", out_px);
+                  if (i + 1 < total) fprintf(cf, ",");
+                  if ((i % 12) == 11 || i + 1 == total) fprintf(cf, "\n");
+                  else fprintf(cf, " ");
+              }
+
+              fprintf(cf, "};\n");
+              fclose(hf);
+              fclose(cf);
+
+              printf("Converted %s -> %s, %s (%ux%u)\n", png_path, h_path, c_path, w, h);
+
+              free(recon);
+              free(raw);
+              free(idat_buf);
+              free(file_buf);
+              return 0;
+          }
+
+          int main(int argc, char **argv) {
+              if (argc < 2) return 1;
+              for (int i = 1; i < argc; i++) {
+                  if (convert_one(argv[i]) != 0) return 1;
+              }
+              return 0;
+          }
+          EOF
+
+          cc -O2 /tmp/png2c_src/png2c.c -lz -o /tmp/png2c_src/png2c
+          /tmp/png2c_src/png2c graphics/*.png
+          ls -la source/gfx
+
+      - name: Build NDS ROM
+        run: |
+          export PATH="/opt/wonderful/bin:$PATH"
+          if [ -f /opt/wonderful/env.sh ]; then
+            . /opt/wonderful/env.sh
+          fi
+          pwd && ls -la
+          make
+          find . -maxdepth 3 -name "*.nds"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cowgame3-ds
+          path: |
+            *.nds
+            **/*.nds
+            
